@@ -1,0 +1,128 @@
+{
+  "specName": "series-index",
+  "timestamp": "2026-09-16T15:30:00+03:00",
+  "status": "implemented",
+  "capturedAtCommit": null,
+  "coverageMap": {
+    "Сигнатура": "done",
+    "Связь с custom_index": "done",
+    "Проверка рядов": "done",
+    "Границы дат": "done",
+    "Режим ставок": "done"
+  },
+  "qaLog": [
+    {
+      "area": "Сигнатура",
+      "question": "Как передавать ряды и веса?",
+      "options": [
+        "Два словаря с общими ключами",
+        "Один словарь {ключ: (ряд, вес)}",
+        "Ключи весов = Series.name"
+      ],
+      "answer": "я передаю в функцию словарь {series : weight} и в name указываю название итогового series"
+    },
+    {
+      "area": "Сигнатура",
+      "question": "Запись {series: weight} в Python невозможна. Какой из ближайших вариантов взять?",
+      "options": [
+        "Список пар [(ряд, вес)]",
+        "Словарь {название: (ряд, вес)}",
+        "Словарь {Series.name: вес} + ряды"
+      ],
+      "answer": "Список пар [(ряд, вес)]"
+    },
+    {
+      "area": "Связь с custom_index",
+      "question": "Где разместить series_index и как связать её с custom_index?",
+      "options": [
+        "moex_cls.py, custom_index вызывает её",
+        "moex_cls.py, независимая копия",
+        "fund_growth.py рядом с value_growth"
+      ],
+      "answer": "moex_cls.py, независимая копия"
+    },
+    {
+      "area": "Проверка рядов",
+      "question": "Насколько строго проверять переданные ряды?",
+      "options": [
+        "Как в value_growth",
+        "Строго, без молчаливых правок",
+        "Средне"
+      ],
+      "answer": "Как в value_growth"
+    },
+    {
+      "area": "Границы дат",
+      "question": "Обязательны ли start_date и finish_date?",
+      "options": [
+        "Можно None",
+        "Обязательные, как в custom_index"
+      ],
+      "answer": "Можно None"
+    },
+    {
+      "area": "Режим ставок",
+      "question": "В каком формате приходят ставки во входном ряду при cumulative=True?",
+      "options": [
+        "% годовых: 21.35",
+        "Доли: 0.2135"
+      ],
+      "answer": "% годовых: 21.35"
+    }
+  ],
+  "baseline": {
+    "derivedFrom": "general_projects/moex_cls.py (custom_index), general_projects/fund_growth.py (value_growth)",
+    "capturedAtCommit": null,
+    "claims": [
+      {
+        "id": "C1",
+        "area": "Сигнатура",
+        "kind": "runtime",
+        "source": "pandas 3.0.5",
+        "claim": "{pd.Series: float} -> TypeError: unhashable type: 'Series'"
+      },
+      {
+        "id": "C2",
+        "area": "Связь с custom_index",
+        "kind": "code",
+        "path": "general_projects/moex_cls.py",
+        "symbol": "custom_index",
+        "claim": "custom_index не вызывает series_index"
+      },
+      {
+        "id": "C3",
+        "area": "Проверка рядов",
+        "kind": "code",
+        "path": "general_projects/fund_growth.py",
+        "symbol": "value_growth",
+        "claim": "время обрезается, пояс снимается, за день последнее значение, NaN удаляются"
+      },
+      {
+        "id": "C4",
+        "area": "Связь с custom_index",
+        "kind": "code",
+        "path": "emetric_projects/mva/moex_cls.py",
+        "claim": "старая копия от 22.08.2026 без custom_index/series_index; её импортируют ноутбуки arimas/garch/rasp"
+      },
+      {
+        "id": "C5",
+        "area": "Режим ставок",
+        "kind": "external",
+        "source": "ISS RUSFAR vs RUSFARIND 09.01.2025–15.09.2026",
+        "claim": "простой процент за пропуск ACT/365 расходится с RUSFARIND на 0.27 б.п.; капитализация по дням — 1.41 б.п."
+      }
+    ]
+  },
+  "driftLedger": [],
+  "previewUrl": null,
+  "sourceIssue": null,
+  "feedbackRounds": [
+    {
+      "round": 1,
+      "feedback": "Флаг cumulative=True: считать накопленную доходность вложения под ставку overnight, база 365, в выходные и пропуски — последняя ставка, выход в долях",
+      "changes": "Добавлен режим ставок (D7–D10); проверен сверкой RUSFAR с биржевым RUSFARIND"
+    }
+  ],
+  "redTeamStatus": "skipped",
+  "redTeamFindings": null
+}

@@ -1,0 +1,142 @@
+{
+  "specName": "value-growth",
+  "timestamp": "2026-09-15",
+  "status": "implemented",
+  "capturedAtCommit": null,
+  "previewUrl": "https://claude.ai/artifact/PLVS28mZZgBeU97osdQ1fA",
+  "sourceIssue": null,
+  "redTeamStatus": "skipped",
+  "redTeamFindings": null,
+  "feedbackRounds": [
+    {
+      "date": "2026-09-15",
+      "feedback": "всё ок, пиши спеку и реализуй",
+      "changes": "нет; спека записана, реализация выполнена"
+    }
+  ],
+  "driftLedger": [],
+  "coverageMap": {
+    "Входной ряд": "done",
+    "Границы/база": "done",
+    "Разбор дат и время": "done",
+    "Формат выхода": "done",
+    "Пропуски и ошибки": "done",
+    "Размещение и переиспользование": "done",
+    "Тесты": "done"
+  },
+  "baseline": {
+    "derivedFrom": "codebase",
+    "capturedAtCommit": null,
+    "claims": [
+      {
+        "id": "C1",
+        "area": "Размещение и переиспользование",
+        "claim": "general_projects/funds_perform/nav_perform.py defines nav_growth(start_date, finish_date, nav, max_lag_days) returning a scalar",
+        "evidence": "general_projects/funds_perform/nav_perform.py:74"
+      },
+      {
+        "id": "C2",
+        "area": "Разбор дат и время",
+        "claim": "nav_growth parses dates with pd.Timestamp(start_date), which reads '01.02.2026' as 2026-01-02 on pandas 3.0.5",
+        "evidence": "general_projects/funds_perform/nav_perform.py:83"
+      },
+      {
+        "id": "C3",
+        "area": "Размещение и переиспользование",
+        "claim": "growth_path computes per-date growth via reindex+ffill and vals / v0 - 1",
+        "evidence": "general_projects/funds_perform/nav_perform.py:292"
+      },
+      {
+        "id": "C4",
+        "area": "Размещение и переиспользование",
+        "claim": "nav_perform.py is run as a script from its own folder and imports nav_perform_excel by bare name",
+        "evidence": "general_projects/funds_perform/nav_perform.py:315"
+      },
+      {
+        "id": "C5",
+        "area": "Тесты",
+        "claim": "pytest is not installed in venv general_0 nor in system python3",
+        "evidence": "general_projects/general_0/lib/python3.13/site-packages"
+      },
+      {
+        "id": "C6",
+        "area": "Входной ряд",
+        "claim": "Environment: Python 3.13.14, pandas 3.0.5, numpy 2.5.2",
+        "evidence": "general_projects/general_0/pyvenv.cfg"
+      },
+      {
+        "id": "C7",
+        "area": "Размещение и переиспользование",
+        "claim": "general_projects/fund_growth.py does not exist yet",
+        "evidence": "general_projects/"
+      }
+    ]
+  },
+  "qaLog": [
+    {
+      "area": "Анализ кода",
+      "question": "Проанализировать код general_projects перед интервью?",
+      "answer": "Да, анализировать"
+    },
+    {
+      "area": "Входной ряд",
+      "question": "Что значит «даты могут быть не индексом»?",
+      "answer": "Индексом могут служить как даты, так и просто цифры 1,2,3 — главное считать прирост значения"
+    },
+    {
+      "area": "Входной ряд",
+      "question": "Если индекс — цифры, что делать с start_date и finish_date?",
+      "answer": "Индекс-дата и указаны start/finish — расчёт относительно start_date до finish_date; индекс-число — расчёт относительно первого значения. Значения только float/int, иначе падение «одно из значений не float/int»"
+    },
+    {
+      "area": "Границы/база",
+      "question": "start_date на субботу — относительно какого значения считать?",
+      "answer": "Параметр strict: False (по умолчанию) — последнее на дату или раньше; True — строгий. Все расчёты идут с нуля"
+    },
+    {
+      "area": "Границы/база",
+      "question": "Какие даты в индексе выхода?",
+      "answer": "Границы = start/finish (добавляются, если нет в ряду)"
+    },
+    {
+      "area": "Разбор дат и время",
+      "question": "Timestamp с временем против индекса 18:00 — входит ли день?",
+      "answer": "Всё обрезать до дня"
+    },
+    {
+      "area": "Формат выхода",
+      "question": "В каком виде вернуть прирост?",
+      "answer": "Доля + необязательный флаг pct=True, по умолчанию False"
+    },
+    {
+      "area": "Пропуски и ошибки",
+      "question": "Что делать с NaN?",
+      "answer": "Выкидывать до расчёта"
+    },
+    {
+      "area": "Пропуски и ошибки",
+      "question": "Период за границами данных?",
+      "answer": "start раньше — ошибка; finish позже — последнее значение"
+    },
+    {
+      "area": "Размещение и переиспользование",
+      "question": "Куда положить функцию и что делать с nav_growth?",
+      "answer": "Новый модуль + починить баг"
+    },
+    {
+      "area": "Тесты",
+      "question": "Как зафиксировать проверки?",
+      "answer": "Самопроверка в модуле"
+    },
+    {
+      "area": "Red-team",
+      "question": "Прогнать red-team?",
+      "answer": "Нет, пропустить"
+    },
+    {
+      "area": "Превью",
+      "question": "Artifact-превью или сразу markdown?",
+      "answer": "Превью в Artifact"
+    }
+  ]
+}

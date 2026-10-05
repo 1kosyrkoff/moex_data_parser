@@ -1,0 +1,45 @@
+{
+  "specName": "custom-index",
+  "timestamp": "2026-09-16T13:45:00+03:00",
+  "status": "implemented",
+  "capturedAtCommit": null,
+  "coverageMap": {
+    "Методика": "done",
+    "База/шкала": "done",
+    "Веса": "done",
+    "Тикеры и мёртвые индексы": "done",
+    "Даты и inner join": "done",
+    "Выход": "done"
+  },
+  "qaLog": [
+    {"area": "Методика", "question": "Как должны работать веса во времени?", "options": ["Ежедневная ребалансировка", "Без ребалансировки", "Периодическая ребалансировка", "Сумма уровней Σ wᵢ·Pᵢ"], "answer": "Ежедневная ребалансировка"},
+    {"area": "База/шкала", "question": "От какой даты считать базу, если на start_date не все компоненты имеют значение?", "options": ["Первая общая дата ≥ start", "Последняя общая дата ≤ start", "Как второе, но с датой start"], "answer": "Первая общая дата ≥ start"},
+    {"area": "Веса", "question": "Как проверять веса из словаря?", "options": ["Строго: сумма = 1, все > 0", "Нормировать к сумме 1", "Строго, но принимать проценты", "Как есть: остаток = кэш, минус = шорт"], "answer": "Строго: сумма = 1, все > 0"},
+    {"area": "Тикеры и мёртвые индексы", "question": "Что делать, если компонент не покрывает период?", "options": ["Пусто → ошибка, частично → warning", "Любая недостача → ошибка", "Чистый inner join, молча"], "answer": "Пусто → ошибка, частично → warning"},
+    {"area": "Даты и inner join", "question": "Что делать с незакрытой сегодняшней свечой?", "options": ["Отбрасывать незакрытые", "Оставлять как есть", "Параметр intraday=False"], "answer": "Параметр intraday=False"},
+    {"area": "Тикеры и мёртвые индексы", "question": "Какие тикеры разрешить в корзине?", "options": ["Любые, без проверок", "Любые, но warning на не-индексы", "Только индексы"], "answer": "Любые, без проверок"},
+    {"area": "Выход", "question": "Как двигаемся дальше? (итоговая таблица решений)", "options": ["Спека + сразу код", "Сначала red-team проход", "Спека артефактом-превью", "Не согласен с чем-то в таблице"], "answer": "Пусть считаются доходности каждого индекса, а дальше формируется доходность композита. Возвращать доходность, а не сам индекс"},
+    {"area": "Выход", "question": "Какую доходность композита возвращать?", "options": ["Дневные доходности композита", "Накопленная с первой даты", "Параметр cumulative"], "answer": "Накопленная с первой даты"}
+  ],
+  "baseline": {
+    "derivedFrom": "general_projects/moex_cls.py + live MOEX ISS checks",
+    "capturedAtCommit": null,
+    "claims": [
+      {"id": "C1", "area": "Даты и inner join", "kind": "code", "path": "general_projects/moex_cls.py", "symbol": "get_candles", "claim": "get_candles вызывает find_board и сам выбирает борду"},
+      {"id": "C2", "area": "Даты и inner join", "kind": "code", "path": "general_projects/moex_cls.py", "symbol": "parse_date", "claim": "parse_date разбирает DD.MM.YYYY через strptime и возвращает YYYY-MM-DD"},
+      {"id": "C3", "area": "Тикеры и мёртвые индексы", "kind": "external", "source": "ISS /securities/RUCBITR.json", "claim": "RUCBITR: SNDX, is_traded=0, history_till 2023-05-31"},
+      {"id": "C4", "area": "Тикеры и мёртвые индексы", "kind": "external", "source": "ISS /securities.json?q=MCFTR", "claim": "MCFTRNS не существует; есть MCFTR, MCFTRN, MCFTRR"},
+      {"id": "C5", "area": "Даты и inner join", "kind": "external", "source": "ISS candles RUCBTRNS vs IMOEX", "claim": "RUCBTRNS считается в выходные с 25.04.2026, IMOEX — нет"},
+      {"id": "C6", "area": "Даты и inner join", "kind": "external", "source": "ISS candles 2026", "claim": "у закрытых дневных свечей end бывает 23:59:55–23:59:58; в 2012–2019 всегда 23:59:59"},
+      {"id": "C7", "area": "Даты и inner join", "kind": "external", "source": "ISS candles 16.09.2026 13:32 MSK", "claim": "внутри дня IMOEX и RUCBTRNS отдают свечу за сегодня, MCFTRR/MCFTRN — нет"}
+    ]
+  },
+  "driftLedger": [],
+  "previewUrl": null,
+  "sourceIssue": null,
+  "feedbackRounds": [
+    {"round": 1, "feedback": "Возвращать доходность композита, а не уровень индекса", "changes": "Убран base; выход — накопленная доходность в долях с 0 на первой общей дате; доходности тикеров считаются после join"}
+  ],
+  "redTeamStatus": "skipped",
+  "redTeamFindings": null
+}
