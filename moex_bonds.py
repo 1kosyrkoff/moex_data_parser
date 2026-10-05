@@ -635,19 +635,16 @@ def _total(*values) -> Optional[float]:
     return round(sum(known), 8) if known else None
 
 
-SCHEDULE_COLUMNS = ["ISIN", "SECID", "SHORTNAME", "date", "KIND", "Coupon", "rate",
-                    "AMORTIZATION", "AMOUNT", "FACEVALUE", "FACEUNIT", "STARTDATE",
-                    "RECORDDATE", "OFFERPRICE", "OFFERAMOUNT", "OFFERSTART", "OFFEREND",
+SCHEDULE_COLUMNS = ["ISIN", "SECID", "SHORTNAME", "date", "coupon_amount", "rate",
+                    "amort_amount", "total_amount", "FACEVALUE", "FACEUNIT", "STARTDATE",
+                    "RECORDDATE", "OFFERPRICE", "offer_amount", "OFFERSTART", "OFFEREND",
                     "CALLOPTIONDATE", "PUTOPTIONDATE", "STATUS"]
 
 SCHEDULE_DATES = ["date", "STARTDATE", "RECORDDATE", "OFFERSTART", "OFFEREND",
                   "CALLOPTIONDATE", "PUTOPTIONDATE"]
 
-SCHEDULE_NUMBERS = ["Coupon", "rate", "AMORTIZATION", "AMOUNT", "FACEVALUE",
-                    "OFFERPRICE", "OFFERAMOUNT"]
-
-COUPON, AMORT, MATURITY, OFFER = "coupon", "amortization", "maturity", "offer"
-KIND_ORDER = [COUPON, AMORT, MATURITY, OFFER]      # порядок склейки метки дня
+SCHEDULE_NUMBERS = ["coupon_amount", "rate", "amort_amount", "total_amount", "FACEVALUE",
+                    "OFFERPRICE", "offer_amount"]
 
 
 def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
@@ -657,27 +654,34 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
 
     Отдается все, что ISS знает по выпуску, включая уже прошедшие выплаты. Дата в пределах
     выпуска встречается ровно один раз: купон, транш амортизации и оферта одного дня лежат
-    в одной строке, каждый в своей колонке, а не в трех строках с повторенной датой.
-    У ненайденного выпуска будет одна строка с KIND='not found' и причиной в STATUS: одна
-    битая бумага не роняет пачку.
+    в одной строке, каждый в своей колонке.
 
-    KIND — что за события пришлись на дату, метками через '+' в порядке
-    coupon, amortization, maturity, offer: 'coupon', 'coupon+offer', 'coupon+maturity'.
-    Одной метки в KIND по колонкам с суммами не восстановить: у необъявленного купона
-    (флоатеры, бумаги с купоном только до оферты) Coupon пустой, и без KIND такая дата
-    не отличалась бы от даты без купона. Фильтровать: KIND.str.contains('amortization').
+    Суммы выплат дня (наш расчет, snake_case; сырые поля ISS остались в ВЕРХНЕМ регистре):
+      coupon_amount — купон;
+      amort_amount  — погашение номинала: транш амортизации, а в дату погашения выпуска
+                      последний транш (у досрочно амортизированной бумаги там 0.0);
+      total_amount  — вся выплата дня, coupon_amount + amort_amount;
+      offer_amount  — выкуп по оферте: цена оферты от непогашенного номинала.
 
-    Coupon и rate отдаются СЫРЫМИ: если купон еще не объявлен, там NaN, а не оценка.
-    Доходности в get_bond_yields при этом считаются с переносом последней ставки —
-    расписание и доходность намеренно расходятся в этом месте.
+    Тип события отдельной колонкой не дублируется, он читается из самих колонок:
+      купон на дату      — заполнен STARTDATE (ISS отдает купонный период и у еще не
+                           объявленного купона, так что купонная дата видна и при пустом
+                           coupon_amount), у некупонных дат он пустой;
+      погашение номинала — заполнен amort_amount;
+      оферта             — заполнены OFFERPRICE и/или OFFERSTART/OFFEREND (цены у оферты
+                           может не быть — 62 случая на 630 оферт, — но границы периода
+                           ISS отдает всегда, так что дата оферты не теряется);
+      погашение выпуска  — последняя дата расписания: дату погашения мы ставим в него
+                           всегда, даже если номинал разошелся амортизацией раньше.
 
-    AMORTIZATION — погашение номинала в эту дату: транш амортизации, а в дату погашения
-    выпуска — последний транш (KIND там 'maturity', не 'amortization').
+    coupon_amount и rate отдаются СЫРЫМИ: если купон еще не объявлен (флоатеры, бумаги
+    с купоном только до оферты), там NaN, а не оценка. Доходности в get_bond_yields при
+    этом считаются с переносом последней ставки — расписание и доходность намеренно
+    расходятся в этом месте.
 
-    AMOUNT — вся выплата дня в валюте номинала, Coupon + AMORTIZATION. Если купон дня не
-    объявлен, AMOUNT пустой даже при известном транше: сумма выплаты неизвестна, а слагаемые
-    видны в своих колонках. Выкуп по оферте в AMOUNT не входит — он условный и лежит в
-    OFFERAMOUNT (цена оферты от непогашенного номинала): оферту еще надо предъявить.
+    total_amount пустой, если купон дня не объявлен, даже при известном транше: сумма
+    выплаты неизвестна, а слагаемые видны в своих колонках. Выкуп по оферте в total_amount
+    не входит — он условный: оферту еще надо предъявить.
 
     FACEVALUE — непогашенный номинал, действующий на дату события, посчитанный из расписания
     амортизаций; транш этой же даты в нем еще не погашен. Одноименное поле ISS для этого не
@@ -688,6 +692,9 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
     оферту, а не свойство периода. Поэтому они проставлены только в той строке, чья дата с
     ними совпала: так видно, какая из оферт расписания классифицирована биржей. Тип остальных
     оферт не восстановить — offertype в ISS не отличает put от call.
+
+    У ненайденного или сломавшегося выпуска будет одна строка с пустой date и причиной
+    в STATUS: одна битая бумага не роняет пачку. Отфильтровать: df[df.STATUS.isna()].
     """
     if isinstance(isins, str):
         isins = [isins]
@@ -701,7 +708,7 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
         try:
             info = find_bond(isin)
             if not info:
-                rows.append(dict(base, KIND="not found", STATUS="не найден на MOEX"))
+                rows.append(dict(base, STATUS="не найден на MOEX"))
                 continue
             base.update({"SECID": info["SECID"], "SHORTNAME": info.get("SHORTNAME"),
                          "FACEUNIT": info.get("FACEUNIT")})
@@ -712,13 +719,11 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
             amortizations = normalize_amortizations(bondization["amortizations"],
                                                     _num(info.get("FACEVALUE")), today)
             pairs = _amort_pairs(amortizations)
-            events = {}
+            events, coupon_dates = {}, set()
 
-            def event(when, kind):
+            def event(when):
                 """Строка дня: события одной даты попадают в нее, а не двоят дату."""
-                row = events.setdefault(when, dict(base, date=when, KIND=set()))
-                row["KIND"].add(kind)
-                return row
+                return events.setdefault(when, dict(base, date=when))
 
             def outstanding(when, pairs=pairs):
                 """Номинал, действующий на дату: транш этой даты еще не выплачен."""
@@ -728,49 +733,48 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
                 when = _date(r.get("coupondate"))
                 if when is None:
                     continue
-                row = event(when, COUPON)
-                row.update(Coupon=_total(row["Coupon"], _num(r.get("value"))),
+                coupon_dates.add(when)
+                row = event(when)
+                row.update(coupon_amount=_total(row["coupon_amount"], _num(r.get("value"))),
                            rate=_num(r.get("valueprc")),
                            STARTDATE=_date(r.get("startdate")),
                            RECORDDATE=_date(r.get("recorddate")))
 
             redeemed = False
             for when, value in pairs:
-                kind = MATURITY if maturity and when == maturity else AMORT
-                redeemed = redeemed or kind == MATURITY
-                row = event(when, kind)
-                row["AMORTIZATION"] = _total(row["AMORTIZATION"], value)
+                redeemed = redeemed or when == maturity
+                row = event(when)
+                row["amort_amount"] = _total(row["amort_amount"], value)
             if maturity and not redeemed:
                 # номинал разошелся амортизацией до даты погашения — выпуск все равно гасится
-                row = event(maturity, MATURITY)
-                row["AMORTIZATION"] = _total(row["AMORTIZATION"],
+                row = event(maturity)
+                row["amort_amount"] = _total(row["amort_amount"],
                                              outstanding(maturity) or 0.0)
 
             for _, r in bondization["offers"].iterrows():
                 when = _date(r.get("offerdate"))
                 if when is None:
                     continue
-                row = event(when, OFFER)
+                row = event(when)
                 price, face = _num(r.get("price")), outstanding(when)
                 buyback = round(face * price / 100, 8) if price and face else None
-                row.update(OFFERPRICE=price, OFFERAMOUNT=buyback,
+                row.update(OFFERPRICE=price, offer_amount=buyback,
                            OFFERSTART=_date(r.get("offerdatestart")),
                            OFFEREND=_date(r.get("offerdateend")))
 
             for when, row in sorted(events.items()):
-                kinds = row["KIND"]
-                row["KIND"] = "+".join(k for k in KIND_ORDER if k in kinds)
                 row["FACEVALUE"] = outstanding(when)
                 # необъявленный купон делает неизвестной всю выплату дня, а не только себя
-                row["AMOUNT"] = None if COUPON in kinds and row["Coupon"] is None else \
-                    _total(row["Coupon"], row["AMORTIZATION"])
+                unknown = when in coupon_dates and row["coupon_amount"] is None
+                row["total_amount"] = None if unknown else \
+                    _total(row["coupon_amount"], row["amort_amount"])
                 row["CALLOPTIONDATE"] = call if call == when else None
                 row["PUTOPTIONDATE"] = put if put == when else None
                 rows.append(row)
         except requests.RequestException as e:
-            rows.append(dict(base, KIND="error", STATUS=f"ошибка запроса: {e}"))
+            rows.append(dict(base, STATUS=f"ошибка запроса: {e}"))
         except Exception as e:              # noqa: BLE001 — одна битая бумага не роняет пачку
-            rows.append(dict(base, KIND="error", STATUS=f"ошибка разбора: {e}"))
+            rows.append(dict(base, STATUS=f"ошибка разбора: {e}"))
 
     df = pd.DataFrame(rows, columns=SCHEDULE_COLUMNS)
     for column in SCHEDULE_DATES:
@@ -1068,8 +1072,8 @@ if __name__ == "__main__":
         ["ISIN", "SHORTNAME", "SETTLE", "PRICE", "PRICE_DATE", "ACCRUED",
          "FACEVALUE", "MATDATE", "PUTDATE", "STATUS"]], "\n")
     print(get_coupon_schedule("RU000A0ZZ5H3")[
-        ["date", "KIND", "Coupon", "rate", "AMORTIZATION", "AMOUNT", "FACEVALUE",
-         "OFFERPRICE", "PUTOPTIONDATE"]].tail(8), "\n")
+        ["date", "coupon_amount", "rate", "amort_amount", "total_amount", "FACEVALUE",
+         "OFFERPRICE", "offer_amount", "PUTOPTIONDATE"]].tail(8), "\n")
 
     card = get_bond_card("RU000A0ZZ5H3")
     print("карточка:", {name: len(frame) for name, frame in card.items()}, "\n")
