@@ -6,12 +6,12 @@
 
 path_to_excel — выгрузка all_funds_perform_ДДММГГГГ.xlsx (или готовый отчёт
 funds_vs_benchmarks_*.xlsx). Результат — alpha_by_fund_ДДММГГГГ.xlsx рядом с исходным
-файлом: один лист «Сводка», на нём только таблица (шапка в A1, 20 фондов × периоды
+файлом: один лист «Сводка», на нём только таблица (шапка в A1, 19 фондов × периоды
 1 мес … 5 лет, «Периодов с альфой > 0», замечание) и строка-пояснение под ней.
 
-Методика та же, что в полном отчёте: функции берутся из build_funds_vs_benchmarks.py,
-он должен лежать в той же папке. Курс CNY/RUB для «Ликвидность. Юань» берётся с листа
-«Данные» готовых отчётов в той же папке, недостающие даты — с cbr.ru (или из cbr_cny_*.csv).
+Методика расчёта альфы та же, что в полном отчёте: period_defs и fund_metrics берутся из
+build_funds_vs_benchmarks.py, он должен лежать в той же папке. Валюта не учитывается:
+курс CNY/RUB не нужен, «Ликвидность. Юань» в таблицу не входит.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import build_funds_vs_benchmarks as fvb  # noqa: E402  (period_defs, fund_metrics, build_levels)
+import build_funds_vs_benchmarks as fvb  # noqa: E402  (PERIODS, period_defs, fund_metrics)
 
 # Фонды в порядке листа «Сводка»: (название, тип, ряд фонда, бенчмарк, замечание)
 FUNDS = [
@@ -49,9 +49,9 @@ FUNDS = [
     ("Ликвидность", "БПИФ", "RU000A1014L8", "RUSFAR", None),
     ("Корпоративные облигации", "БПИФ", "RU000A1002S8", "RUCBTRNS", None),
     ("Устойчивое развитие российских компаний", "БПИФ", "RU000A103LL2", "MRSVRT", None),
-    ("Ликвидность. Юань", "БПИФ", "RU000A107D41", "RUSFARCNY_RUB",
-     "бенчмарк переведён в рубли по курсу ЦБ; дневные TE/IR/бета искажены таймингом фиксинга"),
 ]
+# дробления паёв: (ряд, дата, множитель) — берутся из основного скрипта
+SPLITS = getattr(fvb, "SPLITS", [("RU000A0JT4S1", "2026-08-14", 100.0)])
 COLS = ["Фонд", "Тип", "Бенчмарк"] + [p for p, _ in fvb.PERIODS] + ["Периодов с альфой > 0", "Замечание"]
 DASH = "—"
 
@@ -68,7 +68,7 @@ PERIOD_WIDTH = 11
 
 # ----------------------------------------------------------------------------- данные
 def _report_data(path: Path) -> pd.DataFrame | None:
-    """Лист «Данные» готового отчёта (уровни рядов, CNYRUB, RUSFARCNY_RUB) или None."""
+    """Лист «Данные» готового отчёта (уровни рядов, уже с поправкой на дробление) или None."""
     try:
         xl = pd.ExcelFile(path)
     except Exception:
@@ -83,29 +83,18 @@ def _report_data(path: Path) -> pd.DataFrame | None:
 
 
 def load_levels(path: Path) -> tuple[pd.DataFrame, str]:
-    """Уровни рядов: из листа «Данные» отчёта или из сырой выгрузки (+ курс CNY/RUB)."""
+    """Уровни рядов (1 + накопленная доходность): из выгрузки или с листа «Данные» отчёта."""
     rep = _report_data(path)
     if rep is not None:
         return rep, f"лист «Данные» файла {path.name}"
-    # сырая выгрузка: курс CNY/RUB — из готовых отчётов в той же папке, остальное с cbr.ru / из CSV
-    known = []
-    for p in sorted(path.parent.glob("funds_vs_benchmarks*.xlsx"), key=lambda x: x.stat().st_mtime):
-        if p.name.startswith("~$"):
-            continue
-        d = _report_data(p)
-        if d is not None and "CNYRUB" in d:
-            known.append(d["CNYRUB"].dropna())
-    cny = pd.concat(known) if known else pd.Series(dtype=float)
-    cny = cny[~cny.index.duplicated(keep="last")].sort_index()
-    tmpl = pd.DataFrame({"CNYRUB": cny})
-    try:
-        lv, _ = fvb.build_levels(str(path), tmpl, None)
-    except SystemExit as err:
-        csvs = sorted(path.parent.glob("cbr_cny_*.csv"), key=lambda x: x.stat().st_mtime)
-        if not csvs:
-            raise
-        print(f"{err}\n→ пробую курс из {csvs[-1].name}")
-        lv, _ = fvb.build_levels(str(path), tmpl, str(csvs[-1]))
+    raw = pd.read_excel(path)
+    raw = raw.rename(columns={raw.columns[0]: "Дата"}).dropna(subset=["Дата"]).set_index("Дата").sort_index()
+    raw.index = pd.DatetimeIndex(raw.index)
+    lv = 1.0 + raw.apply(pd.to_numeric, errors="coerce")
+    for code, d, k in SPLITS:
+        d = pd.Timestamp(d)
+        if code in lv and lv.index.min() < d <= lv.index.max():
+            lv.loc[d:, code] *= k
     return lv, f"выгрузка {path.name}"
 
 
