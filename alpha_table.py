@@ -2,32 +2,49 @@
 # -*- coding: utf-8 -*-
 """Таблица «Альфа по фондам и периодам» с листа «Сводка» — отдельным xlsx.
 
+Из своего кода (вход — DataFrame в формате выгрузки all_funds_perform):
+
+    from alpha_table import make_alpha_table
+
+    df = my_func(...)                    # moment + накопленные доходности рядов (0 на базовую дату)
+    path = make_alpha_table(df, "alpha_by_fund_30092026.xlsx")
+
+Из терминала (вход — файл выгрузки или готовый отчёт funds_vs_benchmarks_*.xlsx):
+
     python ./alpha_table.py 'path_to_excel' [out.xlsx]
 
-path_to_excel — выгрузка all_funds_perform_ДДММГГГГ.xlsx (или готовый отчёт
-funds_vs_benchmarks_*.xlsx). Результат — alpha_by_fund_ДДММГГГГ.xlsx рядом с исходным
-файлом: один лист «Сводка», на нём только таблица (шапка в A1, 19 фондов × периоды
-1 мес … 5 лет, «Периодов с альфой > 0», замечание) и строка-пояснение под ней.
+DataFrame: даты — в колонке «moment» (или «Дата»/«date») либо в DatetimeIndex; остальные колонки —
+ряды фондов и индексов по кодам (RU000A0JR290, MCF2TR, …); значения — накопленная доходность
+в долях (−0.012 = −1,2%). Если в df уже уровни (1 + доходность), передайте levels=True.
+Лишние колонки не мешают; недостающие ряды — ошибка со списком.
 
-Методика расчёта альфы та же, что в полном отчёте: period_defs и fund_metrics берутся из
-build_funds_vs_benchmarks.py, он должен лежать в той же папке. Валюта не учитывается:
+Результат: один лист «Сводка», на нём только таблица (шапка в A1, 19 фондов × периоды 1 мес … 5 лет,
+«Периодов с альфой > 0», замечание) и строка-пояснение двумя строками ниже. Валюта не учитывается:
 курс CNY/RUB не нужен, «Ликвидность. Юань» в таблицу не входит.
+
+Методика — как в полном отчёте: прирост за период = уровень на конец / уровень на начало − 1,
+граница — последнее значение на дату или раньше (допуск 10 дней), «2 года» — максимальное окно
+данных, если история покрывает ≥ 90% периода; альфа = прирост фонда − прирост бенчмарка.
+Модуль самодостаточный: нужны только pandas, numpy и openpyxl.
 """
 from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from pandas.tseries.offsets import DateOffset
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import build_funds_vs_benchmarks as fvb  # noqa: E402  (PERIODS, period_defs, fund_metrics)
+__all__ = ["make_alpha_table", "alpha_dataframe", "FUNDS", "PERIODS"]
 
+# ============================================================================ настройки
 # Фонды в порядке листа «Сводка»: (название, тип, ряд фонда, бенчмарк, замечание)
 FUNDS = [
     ("Индекс МосБиржи (ОПИФ)", "ОПИФ", "RU000A0JR290", "MCF2TR", None),
@@ -50,9 +67,15 @@ FUNDS = [
     ("Корпоративные облигации", "БПИФ", "RU000A1002S8", "RUCBTRNS", None),
     ("Устойчивое развитие российских компаний", "БПИФ", "RU000A103LL2", "MRSVRT", None),
 ]
-# дробления паёв: (ряд, дата, множитель) — берутся из основного скрипта
-SPLITS = getattr(fvb, "SPLITS", [("RU000A0JT4S1", "2026-08-14", 100.0)])
-COLS = ["Фонд", "Тип", "Бенчмарк"] + [p for p, _ in fvb.PERIODS] + ["Периодов с альфой > 0", "Замечание"]
+# Дробления паёв: (ряд, дата, множитель). Применяется, только если скачок есть в данных.
+SPLITS = [("RU000A0JT4S1", "2026-08-14", 100.0)]
+PERIODS = [("1 месяц", 1), ("2 месяца", 2), ("3 месяца", 3), ("6 месяцев", 6), ("12 месяцев", 12),
+           ("2 года", 24), ("3 года", 36), ("4 года", 48), ("5 лет", 60)]
+STALE_DAYS = 10
+MAXWIN_COVERAGE = 0.90
+DATE_COLS = ("moment", "Дата", "date", "Date")
+
+COLS = ["Фонд", "Тип", "Бенчмарк"] + [p for p, _ in PERIODS] + ["Периодов с альфой > 0", "Замечание"]
 DASH = "—"
 
 # оформление как на листе «Сводка»
@@ -66,63 +89,126 @@ WIDTHS = {"A": 40, "B": 8, "C": 17, "M": 14, "N": 75}
 PERIOD_WIDTH = 11
 
 
-# ----------------------------------------------------------------------------- данные
-def _report_data(path: Path) -> pd.DataFrame | None:
-    """Лист «Данные» готового отчёта (уровни рядов, уже с поправкой на дробление) или None."""
-    try:
-        xl = pd.ExcelFile(path)
-    except Exception:
-        return None
-    if "Данные" not in xl.sheet_names:
-        return None
-    df = xl.parse("Данные")
-    df = df.rename(columns={df.columns[0]: "Дата"}).dropna(subset=["Дата"]).set_index("Дата")
-    df.index = pd.DatetimeIndex(df.index)
-    keep = [c for c in df.columns if isinstance(c, str) and not c.startswith("Unnamed") and len(c) < 40]
-    return df[keep].apply(pd.to_numeric, errors="coerce").sort_index()
+# ============================================================================ данные
+def _as_dates(values) -> pd.DatetimeIndex | None:
+    """Даты, если значения на них похожи (≥ 90% распознаётся), иначе None."""
+    s = pd.Series(values)
+    if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_datetime64_any_dtype(s):
+        return None                         # RangeIndex / числа — не даты
+    d = pd.to_datetime(s, dayfirst=True, errors="coerce")
+    return pd.DatetimeIndex(d) if len(d) and d.notna().mean() >= 0.9 else None
 
 
-def load_levels(path: Path) -> tuple[pd.DataFrame, str]:
-    """Уровни рядов (1 + накопленная доходность): из выгрузки или с листа «Данные» отчёта."""
-    rep = _report_data(path)
-    if rep is not None:
-        return rep, f"лист «Данные» файла {path.name}"
-    raw = pd.read_excel(path)
-    raw = raw.rename(columns={raw.columns[0]: "Дата"}).dropna(subset=["Дата"]).set_index("Дата").sort_index()
-    raw.index = pd.DatetimeIndex(raw.index)
-    lv = 1.0 + raw.apply(pd.to_numeric, errors="coerce")
+def prepare_levels(data: pd.DataFrame, levels: bool = False) -> pd.DataFrame:
+    """DataFrame выгрузки → уровни рядов (1 + накопленная доходность) с датами в индексе."""
+    df = data.copy()
+    idx = df.index if isinstance(df.index, pd.DatetimeIndex) else None
+    if idx is None:
+        col = next((c for c in DATE_COLS if c in df.columns), None)
+        if col is not None:
+            idx, df = _as_dates(df[col]), df.drop(columns=col)
+        elif (idx := _as_dates(df.index)) is None:
+            idx, df = _as_dates(df.iloc[:, 0]), df.iloc[:, 1:]     # даты в первой колонке
+        if idx is None:
+            raise ValueError("Не нашёл даты: нужна колонка moment (или Дата/date) либо DatetimeIndex")
+    df.index = pd.DatetimeIndex(idx)
+    df = df[df.index.notna()]
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    df = df.apply(pd.to_numeric, errors="coerce")
+    start = df.apply(lambda c: c.dropna().iloc[0] if c.notna().any() else np.nan).median()
+    if not levels and start > 0.5:
+        raise ValueError("Похоже, в DataFrame уже уровни (≈1 на старте), а не доходности — передайте levels=True")
+    if levels and start < 0.5:
+        raise ValueError("Похоже, в DataFrame накопленные доходности (≈0 на старте) — уберите levels=True")
+    lv = df if levels else 1.0 + df
     for code, d, k in SPLITS:
         d = pd.Timestamp(d)
-        if code in lv and lv.index.min() < d <= lv.index.max():
-            lv.loc[d:, code] *= k
-    return lv, f"выгрузка {path.name}"
+        if code not in lv or not (lv.index.min() < d <= lv.index.max()):
+            continue
+        before = lv.loc[:d - pd.Timedelta(days=1), code].dropna()
+        after = lv.loc[d:, code].dropna()
+        if len(before) and len(after) and after.iloc[0] / before.iloc[-1] < 2.0 / k:   # скачок есть — правим
+            lv.loc[d:, code] = lv.loc[d:, code] * k
+    x = lv.ffill()
+    jumps = (x / x.shift(1) - 1).abs()
+    big = [(c, d.date()) for c in lv.columns for d in jumps.index[jumps[c] > 0.5]]
+    if big:
+        print("ВНИМАНИЕ: дневные изменения > 50% (новое дробление?):", big)
+    return lv
 
 
-# ----------------------------------------------------------------------------- таблица
-def alpha_table(lv: pd.DataFrame) -> tuple[pd.DataFrame, list]:
-    """DataFrame таблицы «Альфа по фондам и периодам» (альфа = прирост фонда − прирост бенчмарка)."""
+# ============================================================================ расчёт
+@dataclass
+class PeriodDef:
+    label: str
+    nominal_start: pd.Timestamp
+    start: pd.Timestamp | None
+    end: pd.Timestamp
+    status: str          # ok | maxwin | short
+
+
+def period_defs(dates: pd.DatetimeIndex) -> list[PeriodDef]:
+    end, first = dates.max(), dates.min()
+    out = []
+    for label, m in PERIODS:
+        nom = end - DateOffset(months=m)
+        if nom >= first:
+            out.append(PeriodDef(label, nom, dates[dates <= nom].max(), end, "ok"))
+        elif (end - first).days / (end - nom).days >= MAXWIN_COVERAGE:
+            out.append(PeriodDef(label, nom, first, end, "maxwin"))
+        else:
+            out.append(PeriodDef(label, nom, None, end, "short"))
+    return out
+
+
+def _asof_pos(s: pd.Series, pos: int, dates: pd.DatetimeIndex) -> int | None:
+    """Позиция последнего значения на строке pos или раньше, не старше STALE_DAYS дней."""
+    d0 = dates[pos]
+    for p in range(pos, -1, -1):
+        if (d0 - dates[p]).days > STALE_DAYS:
+            return None
+        if not pd.isna(s.iat[p]):
+            return p
+    return None
+
+
+def period_alpha(lv: pd.DataFrame, fcode: str, bcode: str, p: PeriodDef) -> float | None:
+    """Альфа (ариф.) фонда к бенчмарку за период; None — период не покрыт данными."""
+    if p.status == "short":
+        return None
+    dates, f, b = lv.index, lv[fcode], lv[bcode]
+    end_pos = dates.get_loc(p.end)
+    start_pos = int(np.argmax((f.notna() & b.notna()).values)) if p.status == "maxwin" else dates.get_loc(p.start)
+    fp, bp = _asof_pos(f, start_pos, dates), _asof_pos(b, start_pos, dates)
+    fe, be = _asof_pos(f, end_pos, dates), _asof_pos(b, end_pos, dates)
+    if None in (fp, bp, fe, be) or fe <= fp or be <= bp:
+        return None
+    return (f.iat[fe] / f.iat[fp] - 1) - (b.iat[be] / b.iat[bp] - 1)
+
+
+def alpha_dataframe(data: pd.DataFrame, *, levels: bool = False) -> tuple[pd.DataFrame, list[PeriodDef]]:
+    """Таблица «Альфа по фондам и периодам» как DataFrame (столбцы — как на листе «Сводка»)."""
+    lv = prepare_levels(data, levels)
     missing = sorted({c for _, _, f, b, _ in FUNDS for c in (f, b)} - set(lv.columns))
     if missing:
-        raise SystemExit(f"В данных нет рядов: {missing}")
-    pdefs = fvb.period_defs(lv.index)
+        raise ValueError(f"В данных нет рядов: {missing}")
+    pdefs = period_defs(lv.index)
     rows = []
     for name, ftype, fcode, bcode, note in FUNDS:
-        alphas = []
-        for p in pdefs:
-            m = fvb.fund_metrics(lv, fcode, bcode, p)
-            alphas.append(m.G if m.status in ("ok", "maxwin") else DASH)
-        nums = [a for a in alphas if a != DASH]
-        rows.append([name, ftype, bcode, *alphas, f"{sum(a > 0 for a in nums)} из {len(nums)}", note])
+        alphas = [period_alpha(lv, fcode, bcode, p) for p in pdefs]
+        nums = [a for a in alphas if a is not None]
+        rows.append([name, ftype, bcode, *[DASH if a is None else a for a in alphas],
+                     f"{sum(a > 0 for a in nums)} из {len(nums)}", note])
     return pd.DataFrame(rows, columns=COLS), pdefs
 
 
-def save_table(df: pd.DataFrame, pdefs: list, out: Path, source: str) -> Path:
+# ============================================================================ xlsx
+def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str | None) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "Сводка"
     ws.sheet_view.showGridLines = False
-    n_per = len(fvb.PERIODS)
-    first_p, last_p = 4, 3 + n_per                       # D … L
+    first_p, last_p = 4, 3 + len(PERIODS)                # D … L
     last_row = len(df) + 1
 
     for c, h in enumerate(COLS, 1):
@@ -179,31 +265,64 @@ def save_table(df: pd.DataFrame, pdefs: list, out: Path, source: str) -> Path:
     if maxwin is not None:
         yrs = f"{(maxwin.end - maxwin.start).days / 365.25:.2f}".replace(".", ",")
         note += f" «{maxwin.label}» — максимальное окно данных {maxwin.start:%d.%m.%Y} – {end:%d.%m.%Y} ({yrs} г)."
-    note += f" Синий — фонд обогнал бенчмарк, красный — отстал, «—» — период не покрыт данными. Источник: {source}."
+    note += " Синий — фонд обогнал бенчмарк, красный — отстал, «—» — период не покрыт данными."
+    if source:
+        note += f" Источник: {source}."
     c = ws.cell(last_row + 2, 1, note)
     c.font = Font(name=ARIAL, sz=9, color=GREY)
 
+    out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     return out
 
 
-# ----------------------------------------------------------------------------- точка входа
-def make_alpha_table(path_to_excel: str, out: str | None = None) -> Path:
-    """Строит xlsx с таблицей «Альфа по фондам и периодам» и возвращает путь к нему."""
-    src = Path(path_to_excel).expanduser().resolve()
+def make_alpha_table(data: pd.DataFrame, out: str | Path | None = None, *, levels: bool = False,
+                     source: str | None = None) -> Path:
+    """DataFrame выгрузки → xlsx с таблицей «Альфа по фондам и периодам». Возвращает путь к файлу.
+
+    data   — DataFrame как all_funds_perform: даты (колонка moment или индекс) + накопленные доходности рядов;
+    out    — куда сохранить; по умолчанию alpha_by_fund_<ДДММГГГГ последней даты>.xlsx в текущей папке;
+    levels — True, если в data уже уровни (1 + доходность), а не доходности;
+    source — подпись источника в строке-пояснении под таблицей (необязательно).
+    """
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError(f"Ожидался pandas.DataFrame, получен {type(data).__name__}")
+    table, pdefs = alpha_dataframe(data, levels=levels)
+    if out is None:
+        out = Path.cwd() / f"alpha_by_fund_{pdefs[0].end:%d%m%Y}.xlsx"
+    return _save_table(table, pdefs, Path(out), source)
+
+
+# ============================================================================ запуск из терминала
+def _read_excel(path: Path) -> tuple[pd.DataFrame, bool, str]:
+    """Файл → (DataFrame, levels, подпись источника): выгрузка или лист «Данные» готового отчёта."""
+    xl = pd.ExcelFile(path)
+    if "Данные" in xl.sheet_names:
+        df = xl.parse("Данные")
+        keep = [c for c in df.columns if isinstance(c, str) and not c.startswith("Unnamed") and len(c) < 40]
+        return df[keep], True, f"лист «Данные» файла {path.name}"
+    return xl.parse(xl.sheet_names[0]), False, f"выгрузка {path.name}"
+
+
+def main(argv: list[str]) -> Path:
+    if not argv:
+        raise SystemExit("Запуск: python ./alpha_table.py 'path_to_excel' [out.xlsx]")
+    src = Path(argv[0]).expanduser().resolve()
     if not src.exists():
         raise SystemExit(f"Нет файла {src}")
-    lv, source = load_levels(src)
-    df, pdefs = alpha_table(lv)
-    if out is None:
+    data, levels, source = _read_excel(src)
+    if len(argv) > 1:
+        out = Path(argv[1])
+    else:
         m = re.search(r"(\d{8})", src.stem)
-        tag = m.group(1) if m else f"{lv.index.max():%d%m%Y}"
-        out = src.with_name(f"alpha_by_fund_{tag}.xlsx")
-    return save_table(df, pdefs, Path(out), source)
+        out = src.with_name(f"alpha_by_fund_{m.group(1)}.xlsx") if m else None
+    res = make_alpha_table(data, out, levels=levels, source=source)
+    print(f"Готово: {res}")
+    return res
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        raise SystemExit("Запуск: python ./alpha_table.py 'path_to_excel' [out.xlsx]")
-    res = make_alpha_table(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
-    print(f"Готово: {res}")
+    try:
+        main(sys.argv[1:])
+    except ValueError as e:
+        raise SystemExit(f"Ошибка: {e}")
