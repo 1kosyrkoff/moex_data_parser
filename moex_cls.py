@@ -3,6 +3,8 @@
 
 custom_index — доходность взвешенного композита тикеров (спецификация: spec-custom-index.md).
 series_index — то же по переданным pd.Series (спецификация: spec-series-index.md).
+quarterly_index — композит с дрейфующими весами и квартальной ребалансировкой
+                  (спецификация: spec-quarterly-index.md).
 """
 import datetime as dt
 import math
@@ -10,6 +12,7 @@ import numbers
 import warnings
 from typing import Literal, Union
 
+import numpy as np
 import requests
 import pandas as pd
 
@@ -321,6 +324,274 @@ def series_index(pairs, start_date=None, finish_date=None, name=None, *,
     growth.name = name
     return growth
 
+
+DATE_COLUMNS = ("tradedate", "date", "begin")  # колонки даты, если индекс фрейма не датовый
+REBALANCE_MONTHS = (1, 4, 7, 10)  # месяцы квартальной ребалансировки в quarterly_index
+
+
+def _as_series(obj, label: str) -> pd.Series:
+    """Ряд пользователя -> pd.Series с датами в индексе: Series как есть, DataFrame — распознаем.
+
+    Даты: датовый индекс, иначе колонка tradedate/date/begin (строки читаются как ДД.ММ.ГГГГ).
+    Значения: 'close' (без учета регистра), иначе единственная колонка 'close*',
+    иначе единственная числовая колонка. Неоднозначно — ValueError со списком колонок.
+    """
+    if isinstance(obj, pd.Series):
+        return obj
+    if not isinstance(obj, pd.DataFrame):
+        raise ValueError(f"{label}: ожидается pd.Series или pd.DataFrame, получено {type(obj).__name__}")
+
+    df = obj
+    dated = pd.api.types.is_datetime64_any_dtype(df.index.dtype) or (
+        df.index.dtype == object and len(df.index) > 0
+        and all(isinstance(x, dt.date) for x in df.index))
+    if not dated:
+        found = [c for c in df.columns if str(c).strip().lower() in DATE_COLUMNS]
+        if not found:
+            raise ValueError(f"{label}: индекс не датовый, колонки даты ({', '.join(DATE_COLUMNS)}) "
+                             f"тоже нет; есть {list(df.columns)}")
+        if len(found) > 1:
+            raise ValueError(f"{label}: колонок даты несколько: {found}, непонятно какая нужна")
+        df = df.set_index(found[0])
+        if not pd.api.types.is_datetime64_any_dtype(df.index.dtype):
+            # дата из строк неоднозначна: 01.02.2026 — это 1 февраля, а не 2 января
+            df.index = pd.to_datetime(df.index, dayfirst=True)
+
+    numeric = [c for c in df.columns
+               if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+    if not numeric:
+        raise ValueError(f"{label}: во фрейме нет числовых колонок, есть {list(df.columns)}")
+    exact = [c for c in numeric if str(c).strip().lower() == "close"]
+    prefixed = [c for c in numeric if str(c).strip().lower().startswith("close")]
+    if len(exact) == 1:
+        column = exact[0]
+    elif len(prefixed) == 1:
+        column = prefixed[0]
+    elif len(numeric) == 1:
+        column = numeric[0]
+    else:
+        raise ValueError(f"{label}: непонятно, какая колонка — значения ряда; числовые: {numeric}. "
+                         f"Передайте одну колонку: df.set_index('дата')['нужная']")
+    return df[column]
+
+
+def _branch_label(obj, series: pd.Series, number: int) -> str:
+    """Имя ветки для сообщений и колонок результата: тикер фрейма -> имя ряда -> 'ряд №N'."""
+    if isinstance(obj, pd.DataFrame):
+        ticker = [c for c in obj.columns if str(c).strip().lower() == "ticker"]
+        if ticker:
+            values = pd.unique(obj[ticker[0]].dropna())
+            if len(values) == 1:
+                return str(values[0])
+    if series.name is not None:
+        return str(series.name)
+    return f"ряд №{number}"
+
+
+def _seed_values(start_values, labels) -> "np.ndarray":
+    """start_values -> стоимости веток в порядке labels: dict/Series по именам, список по порядку."""
+    if isinstance(start_values, pd.Series):
+        start_values = start_values.to_dict()
+    if isinstance(start_values, dict):
+        table = {str(k): v for k, v in start_values.items()}
+        missing = [l for l in labels if l not in table]
+        extra = sorted(set(table) - set(labels))
+        if missing or extra:
+            parts = []
+            if missing:
+                parts.append(f"не хватает веток {missing}")
+            if extra:
+                parts.append(f"лишние ключи {extra}")
+            raise ValueError(f"start_values: {', '.join(parts)}; ожидаются ровно {list(labels)}")
+        raw = [table[l] for l in labels]
+    elif isinstance(start_values, (str, bytes)) or not hasattr(start_values, "__iter__"):
+        raise ValueError("start_values: нужен dict/pd.Series по именам веток или список по порядку pairs")
+    else:
+        raw = list(start_values)
+        if len(raw) != len(labels):
+            raise ValueError(f"start_values: {len(raw)} значений на {len(labels)} веток {list(labels)}")
+    out = []
+    for label, value in zip(labels, raw):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real) \
+                or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"start_values[{label!r}]: нужно число > 0, получено {value!r}")
+        out.append(float(value))
+    return np.array(out, dtype="float64")
+
+
+def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
+                    base: float = None, start_values=None, cumulative=None) -> pd.DataFrame:
+    """Композит с дрейфующими весами и квартальной ребалансировкой (спецификация: spec-quarterly-index.md).
+
+    pairs        — [(ряд, вес), ...]: ряд — pd.Series или pd.DataFrame (даты из индекса либо из
+                   колонки tradedate/date/begin, значения — close/единственная числовая колонка),
+                   вес > 0, сумма весов = 1
+    start_date   — 'DD.MM.YYYY', 'YYYY-MM-DD', date/datetime; None — с начала общего периода
+    finish_date  — то же, включительно; None — до конца общего периода
+    name         — имя колонки уровня в результате; None — 'level'
+    base         — уровень композита на первую общую дату; None — 100. Нельзя вместе с start_values
+    start_values — стоимости веток на первую общую дату: dict/pd.Series по именам веток или
+                   список по порядку pairs. Задает старт посреди квартала, когда веса уже
+                   дрейфовали, — так новый расчет стыкуется с уже посчитанным рядом
+    cumulative   — список ТЕХ ЖЕ объектов, что в pairs: перечисленные ряды — не уровни, а ставки
+                   overnight в % годовых (21.35). Сверка идет по identity (`is`), потому что
+                   `df in list` падает: DataFrame.__eq__ поэлементный
+
+    В отличие от custom_index и series_index, которые ребалансируют композит каждый день
+    (шаг = sum(w * r)), здесь веса дрейфуют: между ребалансировками стоимость ветки живет своей
+    доходностью, value_i[t] = value_i[t-1] * (1 + r_i[t]), и только в первую общую дату января,
+    апреля, июля или октября сбрасывается к целевой доле: value_i[t] = level[t-1] * w_i * (1 + r_i[t]).
+    База сброса — уровень ПРЕДЫДУЩЕГО дня, то есть портфель пересобран по закрытию последнего дня
+    старого квартала, и первый день нового уже зарабатывает на целевых весах.
+
+    Шаг ветки-уровня — r = P_t / P_prev - 1, ветки-ставки — r = ставка_prev / 100 * дни / 365
+    (ставка действует календарные дни до следующей общей даты: пятница — 3 дня; ставка последней
+    даты не начисляется). Даты берутся только те, где значение есть у всех веток, и доходности
+    считаются после join: иначе движение облигационного индекса за субботу пропадет вместе с
+    субботой, а не перейдет в доходность понедельника. Ряды приводятся как в series_index.
+
+    Первая общая дата — строка инициализации, а не ребалансировка, даже если она попала на
+    начало квартала: сброса на ней нет, и переданный start_values сохраняется как есть. Поэтому
+    в start_values нужно отдавать уже пересобранное состояние, если дата стыковки — начало квартала.
+
+    Возвращает DataFrame с индексом date: колонка уровня, rebalance (bool), и на каждую ветку
+    ret_* (шаг, в долях), value_* (стоимость в пунктах, сумма = уровень), weight_* (фактический
+    вес, value/level, в долях). Ряд без данных или нет общих дат — ValueError. Сужение периода
+    больше чем на 10 дней или уход стоимости ветки в ноль — UserWarning.
+    """
+    if isinstance(pairs, (dict, pd.Series, pd.DataFrame, str)) or not hasattr(pairs, "__iter__"):
+        raise ValueError("pairs: нужен список пар [(ряд, вес), ...] "
+                         "(запись {ряд: вес} невозможна — pd.Series не может быть ключом словаря)")
+    pairs = list(pairs)
+    if not pairs:
+        raise ValueError("pairs: нужен непустой список пар [(ряд, вес), ...]")
+
+    objects, weights = [], []
+    for i, pair in enumerate(pairs, 1):
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            got = f"{type(pair).__name__} длины {len(pair)}" if isinstance(pair, (tuple, list)) \
+                else type(pair).__name__
+            raise ValueError(f"пара №{i}: ожидается (ряд, вес), получено {got}")
+        obj, weight = pair
+        if isinstance(weight, bool) or not isinstance(weight, numbers.Real) \
+                or not math.isfinite(weight) or weight <= 0:
+            raise ValueError(f"пара №{i}: вес должен быть числом > 0, получено {weight!r}")
+        objects.append(obj)
+        weights.append(float(weight))
+    total = math.fsum(weights)
+    if abs(total - 1) > 1e-9:  # допуск: 0.2 + 0.2 + 0.6 во float не равно 1
+        raise ValueError(f"pairs: сумма весов {total:.10g}, а должна быть 1")
+
+    if cumulative is None:
+        flagged = []
+    elif isinstance(cumulative, (pd.Series, pd.DataFrame)):
+        raise ValueError("cumulative: нужен список рядов [ряд, ...], а не сам ряд — "
+                         "list(DataFrame) дает имена колонок, и пометка молча не сработает")
+    elif isinstance(cumulative, (str, bytes, dict)) or not hasattr(cumulative, "__iter__"):
+        raise ValueError("cumulative: нужен список тех же объектов, что переданы в pairs")
+    else:
+        flagged = list(cumulative)
+    for k, item in enumerate(flagged, 1):
+        if not any(obj is item for obj in objects):
+            raise ValueError(f"cumulative: элемент №{k} ({type(item).__name__}) не найден среди pairs. "
+                             "Сверка идет по identity (`is`): копия, срез или .copy() не подойдут — "
+                             "передайте в cumulative ровно тот объект, что лежит в pairs")
+    is_rate = [any(obj is item for item in flagged) for obj in objects]
+
+    if base is not None and start_values is not None:
+        raise ValueError("base и start_values вместе не задаются: base — старт с целевых весов, "
+                         "start_values — старт с уже дрейфовавших; выберите одно")
+    if base is not None and (isinstance(base, bool) or not isinstance(base, numbers.Real)
+                             or not math.isfinite(base) or base <= 0):
+        raise ValueError(f"base: нужно число > 0, получено {base!r}")
+
+    start = None if start_date is None else pd.Timestamp(parse_date(start_date, "start_date"))
+    finish = None if finish_date is None else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    if start is not None and finish is not None and start > finish:
+        raise ValueError(f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})")
+    period = " ".join(p for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}") if p)
+
+    labels, values = [], []
+    for i, (obj, rate) in enumerate(zip(objects, is_rate), 1):
+        raw = _as_series(obj, f"ряд №{i}")
+        label = _branch_label(obj, raw, i)
+        if label in labels:
+            raise ValueError(f"ряд №{i}: имя ветки {label!r} уже занято — колонки результата "
+                             "схлопнутся; задайте разные Series.name или имена колонок")
+        v = _clean_series(raw, label, positive=not rate).loc[start:finish]
+        if v.empty:
+            raise ValueError(f"{label}: нет данных {period}")
+        labels.append(label)
+        values.append(v)
+
+    # доходности только после join: иначе движение за даты, которых нет у других рядов, пропадет
+    levels = pd.concat(dict(enumerate(values)), axis=1, join="inner").sort_index()
+    if levels.empty:
+        ranges = "; ".join(f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}"
+                           for l, v in zip(labels, values))
+        raise ValueError(f"{name}: у рядов нет общих дат ({ranges})")
+    levels.columns = labels
+
+    first, last = levels.index[0], levels.index[-1]
+    end = None if finish is None else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    late = start is not None and first - start > LAG
+    early = end is not None and end - last > LAG
+    if late or early:
+        causes = [f"{l} с {v.index[0]:%d.%m.%Y}" for l, v in zip(labels, values)
+                  if late and v.index[0] - start > LAG]
+        causes += [f"{l} по {v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values)
+                   if early and end - v.index[-1] > LAG]
+        warnings.warn(f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
+                      f"индекс посчитан с {first:%d.%m.%Y} по {last:%d.%m.%Y}", stacklevel=2)
+
+    n, k = levels.shape
+    w = np.array(weights, dtype="float64")
+    quotes = levels.to_numpy(dtype="float64")
+    days = levels.index.to_series().diff().dt.days.to_numpy(dtype="float64")
+
+    rets = np.zeros((n, k), dtype="float64")  # первая общая дата — точка отсчета
+    for j in range(k):
+        if is_rate[j]:  # ставка предыдущей даты работает все календарные дни до текущей
+            rets[1:, j] = quotes[:-1, j] / 100.0 * days[1:] / 365.0
+        else:
+            rets[1:, j] = quotes[1:, j] / quotes[:-1, j] - 1.0
+
+    # маркер считается по выровненному индексу и по (год, месяц): сравнение одних номеров месяцев
+    # слепо к году, а shift(1) на первой строке дает NaN и ложную ребалансировку на старте
+    year_month = (levels.index.year * 12 + levels.index.month).to_numpy()
+    rebalance = np.zeros(n, dtype=bool)
+    rebalance[1:] = (year_month[1:] != year_month[:-1]) \
+        & np.isin(levels.index.month.to_numpy()[1:], REBALANCE_MONTHS)
+
+    value = np.empty((n, k), dtype="float64")
+    level = np.empty(n, dtype="float64")
+    value[0] = w * (100.0 if base is None else float(base)) if start_values is None \
+        else _seed_values(start_values, labels)
+    level[0] = value[0].sum()
+    for t in range(1, n):
+        # на ребалансировке база — уровень предыдущего дня: портфель пересобран по его закрытию
+        value[t] = (level[t - 1] * w if rebalance[t] else value[t - 1]) * (1.0 + rets[t])
+        level[t] = value[t].sum()
+
+    spoiled = np.argwhere(value <= 0)
+    if len(spoiled):
+        t, j = spoiled[0]
+        warnings.warn(f"{name}: стоимость ветки {labels[j]} стала {value[t, j]:.6g} "
+                      f"на {levels.index[t]:%d.%m.%Y}, дальше weight_* не имеет смысла", stacklevel=2)
+
+    column = "level" if name is None else str(name)
+    generated = ["rebalance"] + [f"{p}_{l}" for p in ("ret", "value", "weight") for l in labels]
+    if column in generated:
+        raise ValueError(f"name={column!r} совпадает со служебной колонкой результата {generated}")
+
+    out = pd.DataFrame(index=levels.index.copy())
+    out.index.name = "date"
+    out[column] = level
+    out["rebalance"] = rebalance
+    for prefix, data in (("ret", rets), ("value", value), ("weight", value / level[:, None])):
+        for j, label in enumerate(labels):
+            out[f"{prefix}_{label}"] = data[:, j]
+    return out
 
 if __name__ == "__main__":
     print(get_candles("SBER", "2024-01-01", "2024-03-01", "1d").head())
