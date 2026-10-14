@@ -420,7 +420,8 @@ def _seed_values(start_values, labels) -> "np.ndarray":
 
 
 def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
-                    base: float = None, start_values=None, cumulative=None) -> pd.DataFrame:
+                    base: float = None, start_values=None, cumulative=None,
+                    cumulative_yield: bool = False) -> Union[pd.DataFrame, pd.Series]:
     """Композит с дрейфующими весами и квартальной ребалансировкой (спецификация: spec-quarterly-index.md).
 
     pairs        — [(ряд, вес), ...]: ряд — pd.Series или pd.DataFrame (даты из индекса либо из
@@ -436,6 +437,9 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     cumulative   — список ТЕХ ЖЕ объектов, что в pairs: перечисленные ряды — не уровни, а ставки
                    overnight в % годовых (21.35). Сверка идет по identity (`is`), потому что
                    `df in list` падает: DataFrame.__eq__ поэлементный
+    cumulative_yield — True: вернуть не аудит-фрейм, а накопленную доходность композита —
+                   pd.Series (индекс date, значения в долях, имя name), ровно такой же объект,
+                   как у series_index. Не путать с cumulative: тот помечает ряды-ставки
 
     В отличие от custom_index и series_index, которые ребалансируют композит каждый день
     (шаг = sum(w * r)), здесь веса дрейфуют: между ребалансировками стоимость ветки живет своей
@@ -456,8 +460,13 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
 
     Возвращает DataFrame с индексом date: колонка уровня, rebalance (bool), и на каждую ветку
     ret_* (шаг, в долях), value_* (стоимость в пунктах, сумма = уровень), weight_* (фактический
-    вес, value/level, в долях). Ряд без данных или нет общих дат — ValueError. Сужение периода
-    больше чем на 10 дней или уход стоимости ветки в ноль — UserWarning.
+    вес, value/level, в долях). При cumulative_yield=True вместо фрейма возвращается pd.Series
+    накопленной доходности, level / level[0] - 1: 0 на первую общую дату, последнее значение —
+    доходность за период; base на нее не влияет (масштаб сокращается), а start_values влияет —
+    он задает дрейф весов на старте. Методология при этом та же: веса дрейфуют и сбрасываются
+    поквартально, то есть это не то же число, что дает series_index на тех же рядах.
+    Ряд без данных или нет общих дат — ValueError. Сужение периода больше чем на 10 дней или
+    уход стоимости ветки в ноль — UserWarning.
     """
     if isinstance(pairs, (dict, pd.Series, pd.DataFrame, str)) or not hasattr(pairs, "__iter__"):
         raise ValueError("pairs: нужен список пар [(ряд, вес), ...] "
@@ -497,6 +506,11 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
                              "Сверка идет по identity (`is`): копия, срез или .copy() не подойдут — "
                              "передайте в cumulative ровно тот объект, что лежит в pairs")
     is_rate = [any(obj is item for item in flagged) for obj in objects]
+
+    if not isinstance(cumulative_yield, (bool, np.bool_)):
+        raise ValueError("cumulative_yield: нужен флаг True/False (вернуть накопленную доходность "
+                         f"вместо аудит-фрейма), получено {type(cumulative_yield).__name__} — "
+                         "ряды-ставки помечаются другим параметром, cumulative")
 
     if base is not None and start_values is not None:
         raise ValueError("base и start_values вместе не задаются: base — старт с целевых весов, "
@@ -576,8 +590,14 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     spoiled = np.argwhere(value <= 0)
     if len(spoiled):
         t, j = spoiled[0]
+        broken = "доходность" if cumulative_yield else "weight_*"
         warnings.warn(f"{name}: стоимость ветки {labels[j]} стала {value[t, j]:.6g} "
-                      f"на {levels.index[t]:%d.%m.%Y}, дальше weight_* не имеет смысла", stacklevel=2)
+                      f"на {levels.index[t]:%d.%m.%Y}, дальше {broken} не имеет смысла", stacklevel=2)
+
+    if cumulative_yield:  # тот же объект, что отдает series_index, — служебных колонок нет
+        growth = pd.Series(level / level[0] - 1.0, index=levels.index.copy(), name=name)
+        growth.index.name = "date"
+        return growth
 
     column = "level" if name is None else str(name)
     generated = ["rebalance"] + [f"{p}_{l}" for p in ("ret", "value", "weight") for l in labels]
