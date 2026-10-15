@@ -32,11 +32,12 @@
 Результат: один лист «Сводка» — таблица (шапка в A1, строка на пару, периоды 1 мес … 5 лет,
 «Периодов с альфой > 0») и строка-пояснение двумя строками ниже. Валюта не учитывается.
 
-Методика: прирост за период = уровень на конец / уровень на начало − 1. Если у фонда нет
-стоимости ровно на границу периода, берётся ближайшее к ней значение — в любую сторону, но не
-дальше 7 дней (near_days), при равном удалении — более раннее; если история короче периода, но покрывает
-≥ 90% его длины, берётся максимальное окно данных; альфа = прирост фонда − прирост бенчмарка.
-Периоды: 1, 2, 3, 6, 12 месяцев, 1,5 года (365 + 182 = 547 дней), 2, 3, 4 и 5 лет.
+Методика: прирост за период = уровень на конец / уровень на начало − 1, альфа = прирост фонда −
+прирост бенчмарка. Обе границы периода — одна и та же дата для фонда и для бенчмарка: ближайшая
+к календарной границе дата, где есть оба значения (в любую сторону, при равном удалении — более
+ранняя), но не дальше 7 дней (near_days) и не дальше половины длины самого периода. Если такой
+даты нет — в клетке «—»: у этого фонда нет истории на такой период.
+Периоды: 1 и 2 недели, 1, 3, 6 месяцев, 1 год, 1,5 года (365 + 182 = 547 дней), 2, 3 и 5 лет.
 Модуль самодостаточный: нужны только pandas, numpy и openpyxl.
 """
 from __future__ import annotations
@@ -59,19 +60,18 @@ __all__ = ["make_alpha_table", "alpha_dataframe", "prepare_levels", "PERIODS"]
 # ============================================================================ настройки
 # Периоды: (подпись, сдвиг назад от последней даты). Полтора года — ровно 365 + 182 дня.
 PERIODS = [
+    ("1 неделя", pd.Timedelta(days=7)),
+    ("2 недели", pd.Timedelta(days=14)),
     ("1 месяц", DateOffset(months=1)),
-    ("2 месяца", DateOffset(months=2)),
     ("3 месяца", DateOffset(months=3)),
     ("6 месяцев", DateOffset(months=6)),
-    ("12 месяцев", DateOffset(months=12)),
+    ("1 год", DateOffset(months=12)),
     ("1,5 года", pd.Timedelta(days=365 + 182)),
     ("2 года", DateOffset(months=24)),
     ("3 года", DateOffset(months=36)),
-    ("4 года", DateOffset(months=48)),
     ("5 лет", DateOffset(months=60)),
 ]
-NEAR_DAYS = 7          # допуск поиска значения у границы периода: ближайшее в любую сторону, ±7 дней
-MAXWIN_COVERAGE = 0.90
+NEAR_DAYS = 7          # допуск у границы периода: ближайшая дата в любую сторону, ±7 дней
 DATE_COLS = ("moment", "Дата", "date", "Date")
 
 BASE_COLS = ["Фонд", "Бенчмарк"]
@@ -169,70 +169,63 @@ def fund_pairs(lv: pd.DataFrame) -> list[tuple[str, str, pd.Series, pd.Series]]:
 @dataclass
 class PeriodDef:
     label: str
-    nominal_start: pd.Timestamp
-    start: pd.Timestamp | None
-    end: pd.Timestamp
-    status: str          # ok | maxwin | short
+    nominal_start: pd.Timestamp     # граница периода «по календарю»
+    end: pd.Timestamp               # последняя дата данных
+    days: int                       # номинальная длина периода в днях
 
 
 def period_defs(dates: pd.DatetimeIndex) -> list[PeriodDef]:
-    end, first = dates.max(), dates.min()
-    out = []
-    for label, off in PERIODS:
-        nom = end - off
-        if nom >= first:
-            out.append(PeriodDef(label, nom, dates[dates <= nom].max(), end, "ok"))
-        elif (end - first).days / max((end - nom).days, 1) >= MAXWIN_COVERAGE:
-            out.append(PeriodDef(label, nom, first, end, "maxwin"))
-        else:
-            out.append(PeriodDef(label, nom, None, end, "short"))
-    return out
+    end = dates.max()
+    return [PeriodDef(label, end - off, end, (end - (end - off)).days) for label, off in PERIODS]
 
 
-def _near_pos(s: pd.Series, pos: int, dates: pd.DatetimeIndex, max_days: int = NEAR_DAYS) -> int | None:
-    """Позиция ближайшего к dates[pos] непустого значения — в любую сторону, но не дальше max_days дней.
+def _near_pos(ok: np.ndarray, anchor: pd.Timestamp, dates: pd.DatetimeIndex, max_days: int) -> int | None:
+    """Позиция ближайшей к anchor даты, помеченной в ok; не дальше max_days дней, иначе None.
 
-    Нужна, когда у фонда нет стоимости ровно на границу периода (пропуск в данных, праздник,
-    пай ещё/уже не считался): берём ближайшее значение, при равном удалении — более раннее.
-    Если в окне ±max_days значений нет — None, период уйдёт в «—».
+    ok — маска «на этой дате есть и фонд, и бенчмарк». Ищем в обе стороны: назад — когда на саму
+    границу стоимости нет (пропуск, праздник), вперёд — когда история началась чуть позже границы.
+    При равном удалении берётся более ранняя дата. anchor может лежать вне индекса.
     """
-    d0, n = dates[pos], len(dates)
-    back, fwd = pos, pos + 1
+    n = len(dates)
+    back = int(dates.searchsorted(anchor, side="right")) - 1     # последняя дата ≤ anchor, может быть -1
+    fwd = back + 1
     while back >= 0 or fwd < n:
-        db = (d0 - dates[back]).days if back >= 0 else None
-        dw = (dates[fwd] - d0).days if fwd < n else None
+        db = (anchor - dates[back]).days if back >= 0 else None
+        dw = (dates[fwd] - anchor).days if fwd < n else None
         if db is not None and db > max_days:
-            back, db = -1, None                              # назад вышли за окно — больше не смотрим
+            back, db = -1, None                                  # назад вышли за окно
         if dw is not None and dw > max_days:
             fwd, dw = n, None
         if db is None and dw is None:
             return None
-        if dw is None or (db is not None and db <= dw):       # ближе назад (при равенстве — тоже назад)
-            if not pd.isna(s.iat[back]):
+        if dw is None or (db is not None and db <= dw):          # ближе назад (при равенстве — тоже назад)
+            if ok[back]:
                 return back
             back -= 1
         else:
-            if not pd.isna(s.iat[fwd]):
+            if ok[fwd]:
                 return fwd
             fwd += 1
     return None
 
 
 def period_alpha(f: pd.Series, b: pd.Series, p: PeriodDef, near_days: int = NEAR_DAYS) -> float | None:
-    """Альфа (ариф.) фонда к бенчмарку за период; None — период не покрыт данными."""
-    if p.status == "short":
+    """Альфа (ариф.) фонда к бенчмарку за период; None — у этой пары нет данных на период.
+
+    Обе границы — ОДНА И ТА ЖЕ дата для фонда и для бенчмарка (ближайшая к границе, где есть оба).
+    Иначе на пропуске в одном из рядов окна разъезжаются и альфа ловит движение рынка за эти дни.
+    Допуск у границы — near_days, но не больше половины длины самого периода: для «1 недели» это
+    3 дня, иначе семидневная натяжка превратила бы недельную альфу в двухдневную или двухнедельную.
+    """
+    ok = (f.notna() & b.notna()).values
+    if not ok.any():
         return None
-    dates = f.index
-    both = (f.notna() & b.notna()).values
-    if not both.any():
+    dates, allow = f.index, min(near_days, max(1, p.days // 2))
+    sp = _near_pos(ok, p.nominal_start, dates, allow)
+    ep = _near_pos(ok, p.end, dates, allow)
+    if sp is None or ep is None or ep <= sp:
         return None
-    end_pos = dates.get_loc(p.end)
-    start_pos = int(np.argmax(both)) if p.status == "maxwin" else dates.get_loc(p.start)
-    fp, bp = _near_pos(f, start_pos, dates, near_days), _near_pos(b, start_pos, dates, near_days)
-    fe, be = _near_pos(f, end_pos, dates, near_days), _near_pos(b, end_pos, dates, near_days)
-    if None in (fp, bp, fe, be) or fe <= fp or be <= bp:
-        return None
-    return (f.iat[fe] / f.iat[fp] - 1) - (b.iat[be] / b.iat[bp] - 1)
+    return (f.iat[ep] / f.iat[sp] - 1) - (b.iat[ep] / b.iat[sp] - 1)
 
 
 def alpha_dataframe(data: pd.DataFrame, *, levels: bool | None = None,
@@ -321,14 +314,11 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
     end = pdefs[0].end
-    maxwin = next((p for p in pdefs if p.status == "maxwin"), None)
     note = (f"Альфа = прирост фонда − прирост бенчмарка за период (арифметическая). Конец всех периодов — "
-            f"{end:%d.%m.%Y}. «1,5 года» — 547 дней (365 + 182). Если у ряда нет значения на границу "
-            f"периода, берётся ближайшее в любую сторону, но не дальше {near_days} дней.")
-    if maxwin is not None:
-        yrs = f"{(maxwin.end - maxwin.start).days / 365.25:.2f}".replace(".", ",")
-        note += f" «{maxwin.label}» — максимальное окно данных {maxwin.start:%d.%m.%Y} – {end:%d.%m.%Y} ({yrs} г)."
-    note += " Синий — фонд обогнал бенчмарк, красный — отстал, «—» — период не покрыт данными."
+            f"{end:%d.%m.%Y}. «1,5 года» — 547 дней (365 + 182). Границы периода — одна и та же дата для "
+            f"фонда и бенчмарка: ближайшая к границе, где есть оба значения, но не дальше {near_days} дней "
+            f"(для коротких периодов — не дальше половины их длины). Синий — фонд обогнал бенчмарк, "
+            f"красный — отстал, «—» — у фонда нет данных на этот период.")
     if source:
         note += f" Источник: {source}."
     c = ws.cell(last_row + 2, 1, note)
