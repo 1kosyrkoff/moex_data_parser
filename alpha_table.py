@@ -55,7 +55,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pandas.tseries.offsets import DateOffset
 
-__all__ = ["make_alpha_table", "alpha_dataframe", "prepare_levels", "PERIODS"]
+__all__ = ["make_alpha_table", "alpha_dataframe", "prepare_levels", "bench_label", "PERIODS"]
 
 # ============================================================================ настройки
 # Периоды: (подпись, сдвиг назад от последней даты). Полтора года — ровно 365 + 182 дня.
@@ -86,7 +86,8 @@ ZEBRA_FILL = PatternFill("solid", fgColor="FFF2F2EF")
 THIN = Side(style="thin", color="FFD6D5CE")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 GREY = "FF52514E"
-FUND_WIDTH, BENCH_WIDTH, PERIOD_WIDTH, COUNT_WIDTH, NOTE_WIDTH = 40, 28, 11, 14, 75
+# ширины в единицах Excel: px = width * 7 + 5 (65 → 460 px, 35 → 250 px)
+FUND_WIDTH, BENCH_WIDTH, PERIOD_WIDTH, COUNT_WIDTH, NOTE_WIDTH = 65, 35, 11, 14, 75
 
 
 # ============================================================================ данные
@@ -154,6 +155,22 @@ def prepare_levels(data: pd.DataFrame, levels: bool | None = None,
         tail = f" … всего {len(big)}" if len(big) > 10 else ""
         print("ВНИМАНИЕ: дневные изменения > 50% (дробление паёв?):", big[:10], tail, sep="")
     return lv
+
+
+def bench_label(bench: str, fund: str) -> str:
+    """Название бенчмарка без приклеенного к нему названия фонда.
+
+    В выгрузке колонка бенчмарка называется «<бенчмарк>, <название колонки фонда>», например
+    'MCFTR, 8 | ОПИФРФИ "ВИМ - Акции"' → 'MCFTR', а 'БЕНЧ: БПИФРФИ "Ликвидность", 26 | …' →
+    'БЕНЧ: БПИФРФИ "Ликвидность"'. Хвост отрезаем по точному совпадению с названием колонки
+    фонда, и только если его нет — по первой запятой. Нет ни того, ни другого — отдаём как есть.
+    """
+    b, f = str(bench).strip(), str(fund).strip()
+    if len(b) > len(f) and b.endswith(f):
+        b = b[: -len(f)].strip().rstrip(",").strip()
+    elif "," in b:
+        b = b.split(",", 1)[0].strip()
+    return b or str(bench).strip()
 
 
 def fund_pairs(lv: pd.DataFrame) -> list[tuple[str, str, pd.Series, pd.Series]]:
@@ -241,7 +258,7 @@ def alpha_dataframe(data: pd.DataFrame, *, levels: bool | None = None,
     for fname, bname, f, b in pairs:
         alphas = [period_alpha(f, b, p, near_days) for p in pdefs]
         nums = [a for a in alphas if a is not None]
-        row = [fname, bname, *[DASH if a is None else a for a in alphas],
+        row = [fname, bench_label(bname, fname), *[DASH if a is None else a for a in alphas],
                f"{sum(a > 0 for a in nums)} из {len(nums)}"]
         if notes:
             row.append(notes.get(fname))
@@ -290,6 +307,8 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
             else:
                 cell.value = v
                 cell.font = Font(name=ARIAL, sz=10)
+                if c == 2:                               # «Бенчмарк» — по центру
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = BORDER
             if zebra:
                 cell.fill = ZEBRA_FILL
