@@ -1,0 +1,9 @@
+**
+!requirements-service.txt
+!requirements-service.lock
+!moex_bonds.py
+!moex_cls.py
+!bond_service/
+!bond_service/*.py
+!deploy/
+!deploy/Dockerfile

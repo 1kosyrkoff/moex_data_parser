@@ -1,0 +1,78 @@
+name: moex-bonds
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+    args:
+      SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  depends_on:
+    postgres:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bonds
+      POSTGRES_USER: bond_admin
+      POSTGRES_PASSWORD: ${BOND_DB_PASSWORD:?Set BOND_DB_PASSWORD}
+      BOND_WRITER_PASSWORD: ${BOND_WRITER_PASSWORD:?Set BOND_WRITER_PASSWORD}
+      BOND_READER_PASSWORD: ${BOND_READER_PASSWORD:?Set BOND_READER_PASSWORD}
+    volumes:
+      - bond-data:/var/lib/postgresql/data
+      - ./deploy/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U bond_admin -d bonds"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  worker:
+    <<: *app
+    image: moex-bonds-worker:${BOND_IMAGE_TAG:-local}
+    environment:
+      PGHOST: postgres
+      PGDATABASE: bonds
+      PGUSER: bond_writer
+      PGPASSWORD: ${BOND_WRITER_PASSWORD:?Set BOND_WRITER_PASSWORD}
+      BOND_UPDATE_INTERVAL: ${BOND_UPDATE_INTERVAL:-86400}
+      BOND_RUN_TIMEOUT: ${BOND_RUN_TIMEOUT:-43200}
+      BOND_RUN_ARGS: ${BOND_RUN_ARGS:---limit 5 --history-days 30}
+    stop_grace_period: 40s
+
+  api:
+    <<: *app
+    image: moex-bonds-api:${BOND_IMAGE_TAG:-local}
+    command: [python, -m, uvicorn, bond_service.api:app, --host, 0.0.0.0, --port, "8000"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: bonds
+      PGUSER: bond_reader
+      PGPASSWORD: ${BOND_READER_PASSWORD:?Set BOND_READER_PASSWORD}
+      BOND_API_TOKEN: ${BOND_API_TOKEN:?Set BOND_API_TOKEN}
+    ports:
+      - "127.0.0.1:${BOND_API_PORT:-8793}:8000"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  bond-data:
