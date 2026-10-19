@@ -53,7 +53,7 @@ services:
       PGPASSWORD: ${BOND_WRITER_PASSWORD:?Set BOND_WRITER_PASSWORD}
       BOND_UPDATE_INTERVAL: ${BOND_UPDATE_INTERVAL:-86400}
       BOND_RUN_TIMEOUT: ${BOND_RUN_TIMEOUT:-43200}
-      BOND_RUN_ARGS: ${BOND_RUN_ARGS:---limit 5 --history-days 30}
+      BOND_RUN_ARGS: ${BOND_RUN_ARGS:---history-days 365}
     stop_grace_period: 40s
 
   api:

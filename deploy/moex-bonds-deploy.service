@@ -1,0 +1,11 @@
+[Unit]
+Description=MOEX bonds deployment from Git branch new_arch
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/moex_data_parser
+ExecStart=/bin/bash /opt/moex_data_parser/deploy/auto-deploy.sh
+TimeoutStartSec=20min

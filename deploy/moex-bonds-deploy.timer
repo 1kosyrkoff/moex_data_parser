@@ -1,0 +1,11 @@
+[Unit]
+Description=Check MOEX bonds branch new_arch every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=15s
+Unit=moex-bonds-deploy.service
+
+[Install]
+WantedBy=timers.target

@@ -7,6 +7,13 @@ if [ "$(id -u)" -ne 0 ]; then
   echo 'Run as root on the VM.' >&2
   exit 1
 fi
+if [ "${BOND_DEPLOY_LOCK_HELD:-0}" != 1 ]; then
+  exec 9>.git/moex-deploy.lock
+  if ! flock -n 9; then
+    echo 'Another deployment is already running.' >&2
+    exit 75
+  fi
+fi
 if [ "$(git branch --show-current)" != new_arch ]; then
   echo 'Expected branch new_arch.' >&2
   exit 1
@@ -50,7 +57,7 @@ SOURCE_REVISION=$(git rev-parse HEAD)
 export BOND_IMAGE_TAG
 BOND_IMAGE_TAG=$(git rev-parse --short=12 HEAD)
 export COMPOSE_PARALLEL_LIMIT=1
-compose=(docker compose -f compose.yaml -f deploy/compose.aeza.yaml)
+compose=(docker compose -f compose.yaml)
 "${compose[@]}" config --quiet
 "${compose[@]}" build
 if [ -n "$("${compose[@]}" ps -q worker)" ]; then
@@ -61,6 +68,7 @@ fi
 "${compose[@]}" ps
 endpoint=$("${compose[@]}" port api 8000)
 curl --fail --silent --show-error --max-time 10 "http://${endpoint}/health"
+printf '%s\n' "$SOURCE_REVISION" > .git/moex-deployed-revision
 echo
 echo "Deployed ${SOURCE_REVISION}; API bound to ${endpoint}."
-echo 'Initial run uses .env settings (default: 5 issues). Secrets stay in .env.'
+echo 'Run scope is configured in .env (default: complete current MOEX list). Secrets stay in .env.'
