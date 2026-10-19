@@ -5,6 +5,7 @@ custom_index — доходность взвешенного композита 
 series_index — то же по переданным pd.Series (спецификация: spec-series-index.md).
 quarterly_index — композит с дрейфующими весами и квартальной ребалансировкой
                   (спецификация: spec-quarterly-index.md).
+leveraged_index — доходность фонда с плечом: L в индексе, (1 - L) в деньгах под ставку овернайт.
 """
 import datetime as dt
 import math
@@ -319,6 +320,97 @@ def series_index(pairs, start_date=None, finish_date=None, name=None, *,
         step = (levels.shift(1) / 100 @ pd.Series(weights)) * days / 365
     else:
         step = (levels / levels.shift(1) - 1) @ pd.Series(weights)
+    growth = (1 + step.fillna(0.0)).cumprod() - 1  # первая дата — точка отсчета
+    growth.index.name = "date"
+    growth.name = name
+    return growth
+
+
+def leveraged_index(index_series, rate_series, leverage=2.0, start_date=None, finish_date=None,
+                    name=None, *, funding_spread: float = 0.0) -> pd.Series:
+    """Накопленная доходность фонда с плечом -> Series (индекс date, в долях), как в series_index.
+
+    index_series   — уровни индекса (MEBCTR, RGBITR): pd.Series с датами в индексе
+    rate_series    — ставка овернайт в % годовых (RUSFAR: 16.5 = 16.5% годовых)
+    leverage       — плечо L, любое конечное число: доля СЧА в индексе
+    start_date     — 'DD.MM.YYYY', 'YYYY-MM-DD', date/datetime; None — с начала общего периода
+    finish_date    — то же, включительно; None — до конца общего периода
+    name           — имя возвращаемой Series
+    funding_spread — надбавка к ставке в процентных пунктах, всегда против фонда: при L > 1
+                     заемные деньги стоят ставка + спред, при L < 1 свободные размещаются
+                     под ставка - спред, при L = 1 не влияет
+
+    Портфель — L в индексе и (1 - L) в деньгах под ставку, отрицательные деньги это заём,
+    поэтому шаг между соседними общими датами:
+
+        L * (P_t / P_prev - 1) + (1 - L) * ставка_prev / 100 * дни / 365
+
+    Одна формула на все плечи: L = 2 — 200% индекса и 100% фондирования (ИПИФФИ «2х Акции»:
+    200% r(MEBCTR) - 100% r(RUSFAR)), L = 1 — чистый индекс, 0 < L < 1 — недоинвестированный
+    фонд с остатком в деньгах, L = 0 — только денежный рынок, L < 0 — обратный фонд.
+    Удваивается (умножается на L) ПРИРАЩЕНИЕ индекса, а не его уровень.
+
+    Шаги считаются как в series_index: индексная нога как cumulative=False, денежная как
+    cumulative=True (ставка даты работает все календарные дни до следующей общей даты, в
+    выходные и пропуски — последняя известная, ставка последней даты уже не начисляется),
+    результат — цепочка шагов минус 1: 0 на первой общей дате, последнее — доходность за период.
+    Ряды приводятся через _clean_series: время и часовой пояс отбрасываются, из нескольких
+    значений за день берется последнее по времени, NaN удаляются.
+
+    Ряд без данных за период или нет общих дат — ValueError. Если плечо обнуляет капитал
+    (шаг <= -1), дальше доходность не определена — ValueError с датой. Если из-за ряда период
+    сузился больше чем на 10 дней относительно заданной (не None) границы — UserWarning.
+    В сообщениях ряды называются по Series.name, без имени — «индекс» и «ставка».
+    """
+    for value, arg in ((leverage, "leverage"), (funding_spread, "funding_spread")):
+        if isinstance(value, bool) or not isinstance(value, numbers.Real) or not math.isfinite(value):
+            raise ValueError(f"{arg}: ожидается конечное число, получено {value!r}")
+    leverage, funding_spread = float(leverage), float(funding_spread)
+
+    labels = [str(s.name) if isinstance(s, pd.Series) and s.name is not None else default
+              for s, default in ((index_series, "индекс"), (rate_series, "ставка"))]
+
+    start = None if start_date is None else pd.Timestamp(parse_date(start_date, "start_date"))
+    finish = None if finish_date is None else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    if start is not None and finish is not None and start > finish:
+        raise ValueError(f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})")
+    period = " ".join(p for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}") if p)
+
+    values = []
+    for s, label, positive in zip((index_series, rate_series), labels, (True, False)):
+        v = _clean_series(s, label, positive=positive).loc[start:finish]
+        if v.empty:
+            raise ValueError(f"{label}: нет данных {period}")
+        values.append(v)
+
+    # доходности только после join: иначе движение за даты, которых нет у другого ряда, пропадет
+    both = pd.concat(dict(enumerate(values)), axis=1, join="inner").sort_index()
+    if both.empty:
+        ranges = "; ".join(f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values))
+        raise ValueError(f"{name}: у рядов нет общих дат ({ranges})")
+
+    first, last = both.index[0], both.index[-1]
+    end = None if finish is None else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    late = start is not None and first - start > LAG
+    early = end is not None and end - last > LAG
+    if late or early:
+        causes = [f"{l} с {v.index[0]:%d.%m.%Y}" for l, v in zip(labels, values) if late and v.index[0] - start > LAG]
+        causes += [f"{l} по {v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values) if early and end - v.index[-1] > LAG]
+        warnings.warn(f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
+                      f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}", stacklevel=2)
+
+    px, rate = both[0], both[1]
+    if leverage > 1:                       # заемные деньги дороже ставки
+        rate = rate + funding_spread
+    elif leverage < 1:                     # свободные деньги размещаются дешевле ставки
+        rate = rate - funding_spread
+    days = both.index.to_series().diff().dt.days
+    step = leverage * (px / px.shift(1) - 1) \
+        + (1 - leverage) * (rate.shift(1) / 100 * days / 365)
+    if (step <= -1).any():
+        bad = step.index[step <= -1][0]
+        raise ValueError(f"{name}: на {bad:%d.%m.%Y} шаг {step.loc[bad]:.4g}, плечо {leverage:g} "
+                         f"обнуляет капитал — дальше доходность не определена")
     growth = (1 + step.fillna(0.0)).cumprod() - 1  # первая дата — точка отсчета
     growth.index.name = "date"
     growth.name = name

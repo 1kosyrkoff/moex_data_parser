@@ -11,7 +11,7 @@ import sys
 
 def compose_otchet(inp_period):
     user = "tmp_skosyrkov"
-    password = "A65h9bmstu12sg9!"
+
     start_date = datetime.today() - timedelta(days=365 * 2 - 3)
     finish_date = datetime.today() - timedelta(days=inp_period)
     con = pyodbc.connect(
@@ -342,47 +342,20 @@ def compose_otchet(inp_period):
                     )  # считаем по формуле 200% r(RUEU10) - 100% r(CNYM)
                     all_funds_perform[f"2RUEU10-CNYM, {number + one}"] = result
 
-                case (
-                    "VTBST7"
-                ):  # сложный индекс, считается как 200% r(MEBCTR) - 100% r(RUSFAR)
-                    b_df_1 = fetch_micex_index("MEBCTR", start_dt, finish_dt)
-                    # тяжелый случай. отдельную функцию не буду писать - сори мне лень
-                    b_df_2 = fetch_micex_index("RUSFAR", start_dt, finish_dt)
-                    b_df_2 = (
-                        b_df_2 + 0.3
-                    )  # ЭТО ДОБАВЛЕНИЕ НЕКОТОРОГО СПРЕДА К РУСФАРУ (ПРЕМИЯ ЗА ФОНДИРОВАНИЕ)
-                    # нахожу совпадения по дням
-                    b_df_1.index = pd.to_datetime(b_df_1.index)
-                    b_df_2.index = pd.to_datetime(b_df_2.index)
-
-                    # общие даты
-                    common_index = b_df_1.index.intersection(b_df_2.index).sort_values()
-
-                    # 2. Выравниваем обе Series по общему индексу
-                    idx_one = b_df_1.loc[common_index]
-                    rate = b_df_2.loc[common_index]
-
-                    # 3. Считаем разницу в днях (исправленная строка)
-                    diff_in_days = common_index.to_series().diff().dt.days
-
-                    # 4. Создаем массив под результат и задаем начальное значение
-                    composite_values = np.zeros(len(common_index))
-                    composite_values[0] = 1
-
-                    # 5. Считаем индекс в цикле
-                    for t in range(1, len(common_index)):
-                        # Формула: 2 * (index_one(t)/index_one(t-1) - index_two(t)/100 * diff_days/365) * composite(t-1)
-                        ratio_one = idx_one.iloc[t] / idx_one.iloc[t - 1]
-                        rate_part = (rate.iloc[t] / 100) * (diff_in_days.iloc[t] / 365)
-
-                        composite_values[t] = (
-                            2 * ratio_one - rate_part
-                        ) * composite_values[t - 1]
-
-                    # 6. Переводим в итоговый Series
-                    composite_index = pd.Series(composite_values, index=common_index)
-                    all_funds_perform[f"2MEBCTR-RUSFAR, {number + composite_index}"] = (
-                        composite_index
+                case "VTBST7":
+                    # 200% r(MEBCTR) - 100% r(RUSFAR + спред за фондирование), daily reweight.
+                    # Вся арифметика в mcls.leveraged_index: плечо, конвенция начисления ставки
+                    # по календарным дням и формат вывода там те же, что у mcls.series_index
+                    all_funds_perform[f"2MEBCTR-RUSFAR, {number + one}"] = (
+                        mcls.leveraged_index(
+                            fetch_micex_index("MEBCTR", start_dt, finish_dt),
+                            fetch_micex_index("RUSFAR", start_dt, finish_dt),
+                            leverage=2,
+                            funding_spread=0.3,
+                            start_date=start_dt,
+                            finish_date=finish_dt,
+                            name=one_bench,
+                        )
                     )
 
                 case _:
