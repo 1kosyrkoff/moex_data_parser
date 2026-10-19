@@ -1,0 +1,15 @@
+# Shared 2 GiB VM: initial limited run; total container RAM capped at 1 GiB.
+services:
+  postgres:
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.25
+    command: [postgres, -c, shared_buffers=64MB, -c, max_connections=25, -c, work_mem=2MB]
+  worker:
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 0.50
+  api:
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.25
