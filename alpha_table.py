@@ -40,6 +40,7 @@
 Периоды: 1 и 2 недели, 1, 3, 6 месяцев, 1 год, 1,5 года (365 + 182 = 547 дней), 2, 3 и 5 лет.
 Модуль самодостаточный: нужны только pandas, numpy и openpyxl.
 """
+
 from __future__ import annotations
 
 import re
@@ -55,7 +56,13 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pandas.tseries.offsets import DateOffset
 
-__all__ = ["make_alpha_table", "alpha_dataframe", "prepare_levels", "bench_label", "PERIODS"]
+__all__ = [
+    "make_alpha_table",
+    "alpha_dataframe",
+    "prepare_levels",
+    "bench_label",
+    "PERIODS",
+]
 
 # ============================================================================ настройки
 # Периоды: (подпись, сдвиг назад от последней даты). Полтора года — ровно 365 + 182 дня.
@@ -71,7 +78,7 @@ PERIODS = [
     ("3 года", DateOffset(months=36)),
     ("5 лет", DateOffset(months=60)),
 ]
-NEAR_DAYS = 7          # допуск у границы периода: ближайшая дата в любую сторону, ±7 дней
+NEAR_DAYS = 7  # допуск у границы периода: ближайшая дата в любую сторону, ±7 дней
 DATE_COLS = ("moment", "Дата", "date", "Date")
 
 BASE_COLS = ["Фонд", "Бенчмарк"]
@@ -95,13 +102,16 @@ def _as_dates(values) -> pd.DatetimeIndex | None:
     """Даты, если значения на них похожи (≥ 90% распознаётся), иначе None."""
     s = pd.Series(values)
     if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_datetime64_any_dtype(s):
-        return None                         # RangeIndex / числа — не даты
+        return None  # RangeIndex / числа — не даты
     d = pd.to_datetime(s, dayfirst=True, errors="coerce")
     return pd.DatetimeIndex(d) if len(d) and d.notna().mean() >= 0.9 else None
 
 
-def prepare_levels(data: pd.DataFrame, levels: bool | None = None,
-                   splits: list[tuple[str, str, float]] = ()) -> pd.DataFrame:
+def prepare_levels(
+    data: pd.DataFrame,
+    levels: bool | None = None,
+    splits: list[tuple[str, str, float]] = (),
+) -> pd.DataFrame:
     """DataFrame → уровни рядов (1 + накопленная доходность либо исходные цены) с датами в индексе.
 
     levels=None — определить автоматически (≈0 на старте → доходности, иначе уровни);
@@ -115,27 +125,39 @@ def prepare_levels(data: pd.DataFrame, levels: bool | None = None,
         if col is not None:
             idx, df = _as_dates(df[col]), df.drop(columns=col)
         elif (idx := _as_dates(df.index)) is None:
-            idx, df = _as_dates(df.iloc[:, 0]), df.iloc[:, 1:]     # даты в первой колонке
+            idx, df = _as_dates(df.iloc[:, 0]), df.iloc[:, 1:]  # даты в первой колонке
         if idx is None:
-            raise ValueError("Не нашёл даты: нужна колонка moment (или Дата/date), DatetimeIndex "
-                             "либо даты в первой колонке")
+            raise ValueError(
+                "Не нашёл даты: нужна колонка moment (или Дата/date), DatetimeIndex "
+                "либо даты в первой колонке"
+            )
     df.index = pd.DatetimeIndex(idx)
     df = df[df.index.notna()]
     df = df[~df.index.duplicated(keep="last")].sort_index()
     df = df.apply(pd.to_numeric, errors="coerce")
     first = [df.iloc[:, i].dropna() for i in range(df.shape[1])]
-    start = np.nanmedian([s.iloc[0] for s in first if len(s)]) if any(len(s) for s in first) else np.nan
+    start = (
+        np.nanmedian([s.iloc[0] for s in first if len(s)])
+        if any(len(s) for s in first)
+        else np.nan
+    )
     if np.isnan(start):
         raise ValueError("В колонках нет числовых данных")
     # уровни (цена пая, значение индекса) всегда > 0; доходности бывают отрицательными и стартуют с ≈0
     looks_returns = bool((df < 0).any().any()) or -0.5 < start < 0.5
     if levels is None:
         levels = not looks_returns
-        print(f"Данные распознаны как {'уровни' if levels else 'накопленные доходности'} "
-              f"(первое значение ≈ {start:.4g}); переопределяется флагом levels=")
-    elif levels is looks_returns:            # явный флаг противоречит данным — предупредим, но послушаемся
-        print(f"ВНИМАНИЕ: ряды похожи на {'доходности' if looks_returns else 'уровни'} "
-              f"(первое значение ≈ {start:.4g}), а передано levels={levels}")
+        print(
+            f"Данные распознаны как {'уровни' if levels else 'накопленные доходности'} "
+            f"(первое значение ≈ {start:.4g}); переопределяется флагом levels="
+        )
+    elif (
+        levels is looks_returns
+    ):  # явный флаг противоречит данным — предупредим, но послушаемся
+        print(
+            f"ВНИМАНИЕ: ряды похожи на {'доходности' if looks_returns else 'уровни'} "
+            f"(первое значение ≈ {start:.4g}), а передано levels={levels}"
+        )
     lv = df if levels else 1.0 + df
     for name, d, k in splits:
         d = pd.Timestamp(d)
@@ -144,16 +166,27 @@ def prepare_levels(data: pd.DataFrame, levels: bool | None = None,
         rows = np.flatnonzero(lv.index >= d)
         for pos in [i for i, c in enumerate(lv.columns) if c == name]:
             s = lv.iloc[:, pos]
-            before, after = s.loc[:d - pd.Timedelta(days=1)].dropna(), s.loc[d:].dropna()
+            before, after = (
+                s.loc[: d - pd.Timedelta(days=1)].dropna(),
+                s.loc[d:].dropna(),
+            )
             if len(before) and len(after) and after.iloc[0] / before.iloc[-1] < 2.0 / k:
                 lv.iloc[rows, pos] = s.iloc[rows] * k
     x = lv.ffill()
     jumps = (x / x.shift(1) - 1).abs()
-    big = [(lv.columns[i], d.date()) for i in range(lv.shape[1])
-           for d in jumps.index[jumps.iloc[:, i] > 0.5]]
+    big = [
+        (lv.columns[i], d.date())
+        for i in range(lv.shape[1])
+        for d in jumps.index[jumps.iloc[:, i] > 0.5]
+    ]
     if big:
         tail = f" … всего {len(big)}" if len(big) > 10 else ""
-        print("ВНИМАНИЕ: дневные изменения > 50% (дробление паёв?):", big[:10], tail, sep="")
+        print(
+            "ВНИМАНИЕ: дневные изменения > 50% (дробление паёв?):",
+            big[:10],
+            tail,
+            sep="",
+        )
     return lv
 
 
@@ -177,26 +210,35 @@ def fund_pairs(lv: pd.DataFrame) -> list[tuple[str, str, pd.Series, pd.Series]]:
     """Колонки по порядку → пары (название фонда, название бенчмарка, ряд фонда, ряд бенчмарка)."""
     names = [str(c) for c in lv.columns]
     if len(names) < 2 or len(names) % 2:
-        raise ValueError(f"Нужно чётное число колонок «фонд + бенчмарк», получено {len(names)}: {names}")
-    return [(names[i], names[i + 1], lv.iloc[:, i], lv.iloc[:, i + 1])
-            for i in range(0, len(names), 2)]
+        raise ValueError(
+            f"Нужно чётное число колонок «фонд + бенчмарк», получено {len(names)}: {names}"
+        )
+    return [
+        (names[i], names[i + 1], lv.iloc[:, i], lv.iloc[:, i + 1])
+        for i in range(0, len(names), 2)
+    ]
 
 
 # ============================================================================ расчёт
 @dataclass
 class PeriodDef:
     label: str
-    nominal_start: pd.Timestamp     # граница периода «по календарю»
-    end: pd.Timestamp               # последняя дата данных
-    days: int                       # номинальная длина периода в днях
+    nominal_start: pd.Timestamp  # граница периода «по календарю»
+    end: pd.Timestamp  # последняя дата данных
+    days: int  # номинальная длина периода в днях
 
 
 def period_defs(dates: pd.DatetimeIndex) -> list[PeriodDef]:
     end = dates.max()
-    return [PeriodDef(label, end - off, end, (end - (end - off)).days) for label, off in PERIODS]
+    return [
+        PeriodDef(label, end - off, end, (end - (end - off)).days)
+        for label, off in PERIODS
+    ]
 
 
-def _near_pos(ok: np.ndarray, anchor: pd.Timestamp, dates: pd.DatetimeIndex, max_days: int) -> int | None:
+def _near_pos(
+    ok: np.ndarray, anchor: pd.Timestamp, dates: pd.DatetimeIndex, max_days: int
+) -> int | None:
     """Позиция ближайшей к anchor даты, помеченной в ok; не дальше max_days дней, иначе None.
 
     ok — маска «на этой дате есть и фонд, и бенчмарк». Ищем в обе стороны: назад — когда на саму
@@ -204,18 +246,22 @@ def _near_pos(ok: np.ndarray, anchor: pd.Timestamp, dates: pd.DatetimeIndex, max
     При равном удалении берётся более ранняя дата. anchor может лежать вне индекса.
     """
     n = len(dates)
-    back = int(dates.searchsorted(anchor, side="right")) - 1     # последняя дата ≤ anchor, может быть -1
+    back = (
+        int(dates.searchsorted(anchor, side="right")) - 1
+    )  # последняя дата ≤ anchor, может быть -1
     fwd = back + 1
     while back >= 0 or fwd < n:
         db = (anchor - dates[back]).days if back >= 0 else None
         dw = (dates[fwd] - anchor).days if fwd < n else None
         if db is not None and db > max_days:
-            back, db = -1, None                                  # назад вышли за окно
+            back, db = -1, None  # назад вышли за окно
         if dw is not None and dw > max_days:
             fwd, dw = n, None
         if db is None and dw is None:
             return None
-        if dw is None or (db is not None and db <= dw):          # ближе назад (при равенстве — тоже назад)
+        if dw is None or (
+            db is not None and db <= dw
+        ):  # ближе назад (при равенстве — тоже назад)
             if ok[back]:
                 return back
             back -= 1
@@ -226,7 +272,9 @@ def _near_pos(ok: np.ndarray, anchor: pd.Timestamp, dates: pd.DatetimeIndex, max
     return None
 
 
-def period_alpha(f: pd.Series, b: pd.Series, p: PeriodDef, near_days: int = NEAR_DAYS) -> float | None:
+def period_alpha(
+    f: pd.Series, b: pd.Series, p: PeriodDef, near_days: int = NEAR_DAYS
+) -> float | None:
     """Альфа (ариф.) фонда к бенчмарку за период; None — у этой пары нет данных на период.
 
     Обе границы — ОДНА И ТА ЖЕ дата для фонда и для бенчмарка (ближайшая к границе, где есть оба).
@@ -245,21 +293,34 @@ def period_alpha(f: pd.Series, b: pd.Series, p: PeriodDef, near_days: int = NEAR
     return (f.iat[ep] / f.iat[sp] - 1) - (b.iat[ep] / b.iat[sp] - 1)
 
 
-def alpha_dataframe(data: pd.DataFrame, *, levels: bool | None = None,
-                    splits: list[tuple[str, str, float]] = (),
-                    notes: dict[str, str] | None = None,
-                    near_days: int = NEAR_DAYS) -> tuple[pd.DataFrame, list[PeriodDef]]:
+def alpha_dataframe(
+    data: pd.DataFrame,
+    *,
+    levels: bool | None = None,
+    splits: list[tuple[str, str, float]] = (),
+    notes: dict[str, str] | None = None,
+    near_days: int = NEAR_DAYS,
+) -> tuple[pd.DataFrame, list[PeriodDef]]:
     """Таблица «Альфа по фондам и периодам» как DataFrame (строка на пару «фонд + бенчмарк»)."""
     lv = prepare_levels(data, levels=levels, splits=splits)
     pairs = fund_pairs(lv)
     pdefs = period_defs(lv.index)
-    cols = BASE_COLS + [lbl for lbl, _ in PERIODS] + [COUNT_COL] + ([NOTE_COL] if notes else [])
+    cols = (
+        BASE_COLS
+        + [lbl for lbl, _ in PERIODS]
+        + [COUNT_COL]
+        + ([NOTE_COL] if notes else [])
+    )
     rows = []
     for fname, bname, f, b in pairs:
         alphas = [period_alpha(f, b, p, near_days) for p in pdefs]
         nums = [a for a in alphas if a is not None]
-        row = [fname, bench_label(bname, fname), *[DASH if a is None else a for a in alphas],
-               f"{sum(a > 0 for a in nums)} из {len(nums)}"]
+        row = [
+            fname,
+            bench_label(bname, fname),
+            *[DASH if a is None else a for a in alphas],
+            f"{sum(a > 0 for a in nums)} из {len(nums)}",
+        ]
         if notes:
             row.append(notes.get(fname))
         rows.append(row)
@@ -267,14 +328,19 @@ def alpha_dataframe(data: pd.DataFrame, *, levels: bool | None = None,
 
 
 # ============================================================================ xlsx
-def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str | None,
-                near_days: int = NEAR_DAYS) -> Path:
+def _save_table(
+    df: pd.DataFrame,
+    pdefs: list[PeriodDef],
+    out: Path,
+    source: str | None,
+    near_days: int = NEAR_DAYS,
+) -> Path:
     cols = list(df.columns)
     wb = Workbook()
     ws = wb.active
     ws.title = "Сводка"
     ws.sheet_view.showGridLines = False
-    first_p = len(BASE_COLS) + 1                          # C
+    first_p = len(BASE_COLS) + 1  # C
     last_p = first_p + len(PERIODS) - 1
     count_col = last_p + 1
     note_col = len(cols) if NOTE_COL in cols else None
@@ -284,14 +350,16 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
         cell = ws.cell(1, c, h)
         cell.font = Font(name=ARIAL, sz=9, b=True, color="FFFFFFFF")
         cell.fill = HEAD_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
     ws.row_dimensions[1].height = 31.5
 
     for i, row in enumerate(df.itertuples(index=False), 2):
-        zebra = (i % 2 == 1)                              # как в оригинале: каждая вторая строка
+        zebra = i % 2 == 1  # как в оригинале: каждая вторая строка
         for c, v in enumerate(row, 1):
             cell = ws.cell(i, c)
-            if c == count_col:                            # «Периодов с альфой > 0» — формула от строки
+            if c == count_col:  # «Периодов с альфой > 0» — формула от строки
                 a, b = get_column_letter(first_p), get_column_letter(last_p)
                 cell.value = f'=COUNTIF({a}{i}:{b}{i},">0")&" из "&COUNT({a}{i}:{b}{i})'
                 cell.font = Font(name=ARIAL, sz=10)
@@ -307,7 +375,7 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
             else:
                 cell.value = v
                 cell.font = Font(name=ARIAL, sz=10)
-                if c == 2:                               # «Бенчмарк» — по центру
+                if c == 2:  # «Бенчмарк» — по центру
                     cell.alignment = Alignment(horizontal="center", vertical="center")
             cell.border = BORDER
             if zebra:
@@ -315,10 +383,20 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
 
     rng = f"{get_column_letter(first_p)}2:{get_column_letter(last_p)}{last_row}"
     tl = f"{get_column_letter(first_p)}2"
-    ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({tl}),{tl}>0)"],
-                                                   font=Font(name=ARIAL, sz=10, b=True, color="FF1F5FA9")))
-    ws.conditional_formatting.add(rng, FormulaRule(formula=[f"AND(ISNUMBER({tl}),{tl}<0)"],
-                                                   font=Font(name=ARIAL, sz=10, color="FFB3372F")))
+    ws.conditional_formatting.add(
+        rng,
+        FormulaRule(
+            formula=[f"AND(ISNUMBER({tl}),{tl}>0)"],
+            font=Font(name=ARIAL, sz=10, b=True, color="FF1F5FA9"),
+        ),
+    )
+    ws.conditional_formatting.add(
+        rng,
+        FormulaRule(
+            formula=[f"AND(ISNUMBER({tl}),{tl}<0)"],
+            font=Font(name=ARIAL, sz=10, color="FFB3372F"),
+        ),
+    )
 
     ws.column_dimensions["A"].width = FUND_WIDTH
     ws.column_dimensions["B"].width = BENCH_WIDTH
@@ -328,16 +406,18 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
     if note_col:
         ws.column_dimensions[get_column_letter(note_col)].width = NOTE_WIDTH
     ws.freeze_panes = "B2"
-    ws.page_setup.orientation = "landscape"                # печать: одна страница в ширину
+    ws.page_setup.orientation = "landscape"  # печать: одна страница в ширину
     ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
     end = pdefs[0].end
-    note = (f"Альфа = прирост фонда − прирост бенчмарка за период (арифметическая). Конец всех периодов — "
-            f"{end:%d.%m.%Y}. «1,5 года» — 547 дней (365 + 182). Границы периода — одна и та же дата для "
-            f"фонда и бенчмарка: ближайшая к границе, где есть оба значения, но не дальше {near_days} дней "
-            f"(для коротких периодов — не дальше половины их длины). Синий — фонд обогнал бенчмарк, "
-            f"красный — отстал, «—» — у фонда нет данных на этот период.")
+    note = (
+        f"Альфа = прирост фонда − прирост бенчмарка за период (арифметическая). Конец всех периодов — "
+        f"{end:%d.%m.%Y}. «1,5 года» — 547 дней (365 + 182). Границы периода — одна и та же дата для "
+        f"фонда и бенчмарка: ближайшая к границе, где есть оба значения, но не дальше {near_days} дней "
+        f"(для коротких периодов — не дальше половины их длины). Синий — фонд обогнал бенчмарк, "
+        f"красный — отстал, «—» — у фонда нет данных на этот период."
+    )
     if source:
         note += f" Источник: {source}."
     c = ws.cell(last_row + 2, 1, note)
@@ -348,9 +428,16 @@ def _save_table(df: pd.DataFrame, pdefs: list[PeriodDef], out: Path, source: str
     return out
 
 
-def make_alpha_table(data: pd.DataFrame, out: str | Path | None = None, *, levels: bool | None = None,
-                     splits: list[tuple[str, str, float]] = (), notes: dict[str, str] | None = None,
-                     near_days: int = NEAR_DAYS, source: str | None = None) -> Path:
+def make_alpha_table(
+    data: pd.DataFrame,
+    out: str | Path | None = None,
+    *,
+    levels: bool | None = None,
+    splits: list[tuple[str, str, float]] = (),
+    notes: dict[str, str] | None = None,
+    near_days: int = NEAR_DAYS,
+    source: str | None = None,
+) -> Path:
     """DataFrame → xlsx с таблицей «Альфа по фондам и периодам». Возвращает путь к файлу.
 
     data   — даты (колонка moment / индекс / первая колонка) + колонки парами «фонд, бенчмарк»;
@@ -366,7 +453,9 @@ def make_alpha_table(data: pd.DataFrame, out: str | Path | None = None, *, level
     """
     if not isinstance(data, pd.DataFrame):
         raise TypeError(f"Ожидался pandas.DataFrame, получен {type(data).__name__}")
-    table, pdefs = alpha_dataframe(data, levels=levels, splits=splits, notes=notes, near_days=near_days)
+    table, pdefs = alpha_dataframe(
+        data, levels=levels, splits=splits, notes=notes, near_days=near_days
+    )
     if out is None:
         out = Path.cwd() / f"alpha_by_fund_{pdefs[0].end:%d%m%Y}.xlsx"
     return _save_table(table, pdefs, Path(out), source, near_days)
@@ -375,14 +464,22 @@ def make_alpha_table(data: pd.DataFrame, out: str | Path | None = None, *, level
 # ============================================================================ запуск из терминала
 def main(argv: list[str]) -> Path:
     if not argv:
-        raise SystemExit("Запуск: python ./alpha_table.py 'path_to_excel' [out.xlsx] [лист]")
+        raise SystemExit(
+            "Запуск: python ./alpha_table.py 'path_to_excel' [out.xlsx] [лист]"
+        )
     src = Path(argv[0]).expanduser().resolve()
     if not src.exists():
         raise SystemExit(f"Нет файла {src}")
     xl = pd.ExcelFile(src)
     sheet = argv[2] if len(argv) > 2 else xl.sheet_names[0]
     data = xl.parse(sheet)
-    data = data[[c for c in data.columns if not (isinstance(c, str) and c.startswith("Unnamed"))]]
+    data = data[
+        [
+            c
+            for c in data.columns
+            if not (isinstance(c, str) and c.startswith("Unnamed"))
+        ]
+    ]
     if len(argv) > 1:
         out = Path(argv[1])
     else:
