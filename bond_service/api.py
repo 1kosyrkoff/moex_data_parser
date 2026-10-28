@@ -1,30 +1,14 @@
-"""Authenticated read API. Does not import or call any MOEX function."""
+"""Public read API. Does not import or call any MOEX function."""
 from contextlib import asynccontextmanager
 from datetime import date
-import os
-import secrets
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import FastAPI, HTTPException, Query
 
 from .storage import connect
 
-bearer = HTTPBearer(auto_error=False)
-
-
-def authorize(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):
-    token = os.environ.get('BOND_API_TOKEN', '')
-    if not token:
-        raise HTTPException(503, 'API token is not configured')
-    if credentials is None or not secrets.compare_digest(credentials.credentials, token):
-        raise HTTPException(401, 'Invalid bearer token', headers={'WWW-Authenticate': 'Bearer'})
-
-
 @asynccontextmanager
 async def lifespan(app):
-    if not os.environ.get('BOND_API_TOKEN'):
-        raise RuntimeError('BOND_API_TOKEN must be set')
     with connect(readonly=True) as conn:
         if conn.execute("SELECT has_table_privilege(current_user, 'bond.cards', 'INSERT') AS writable").fetchone()['writable']:
             raise RuntimeError('The API must use a database role without write privileges')
@@ -32,7 +16,6 @@ async def lifespan(app):
 
 
 app = FastAPI(title='MOEX bonds — saved results', lifespan=lifespan)
-protected = [Depends(authorize)]
 
 
 @app.get('/health')
@@ -45,19 +28,19 @@ def health():
         raise HTTPException(503, 'Database is unavailable') from None
 
 
-@app.get('/runs', dependencies=protected)
+@app.get('/runs')
 def runs(limit: int = Query(20, ge=1, le=100)):
     with connect(readonly=True) as conn:
         return conn.execute('SELECT * FROM bond.runs ORDER BY started_at DESC LIMIT %s', (limit,)).fetchall()
 
 
-@app.get('/bonds', dependencies=protected)
+@app.get('/bonds')
 def bonds(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
     with connect(readonly=True) as conn:
         return conn.execute('SELECT * FROM bond.latest_instruments ORDER BY isin LIMIT %s OFFSET %s', (limit, offset)).fetchall()
 
 
-@app.get('/bonds/{isin}', dependencies=protected)
+@app.get('/bonds/{isin}')
 def bond(isin: str, run_id: UUID | None = None):
     isin = isin.strip().upper()
     with connect(readonly=True) as conn, conn.transaction():
@@ -77,7 +60,7 @@ def bond(isin: str, run_id: UUID | None = None):
         return result
 
 
-@app.get('/bonds/{isin}/candles', dependencies=protected)
+@app.get('/bonds/{isin}/candles')
 def candles(isin: str, start: date | None = None, end: date | None = None,
             board: str | None = None, limit: int = Query(1000, ge=1, le=10000)):
     if start and end and start > end:
@@ -91,7 +74,7 @@ def candles(isin: str, start: date | None = None, end: date | None = None,
             (isin.strip().upper(), start, start, end, end, board, board, limit)).fetchall()
 
 
-@app.get('/calendar', dependencies=protected)
+@app.get('/calendar')
 def calendar(start: date, end: date, limit: int = Query(1000, ge=1, le=10000), offset: int = Query(0, ge=0)):
     if start > end:
         raise HTTPException(422, 'start must not be later than end')

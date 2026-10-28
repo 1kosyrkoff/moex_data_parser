@@ -43,7 +43,7 @@ import os
 from pathlib import Path
 import secrets
 text = Path('.env.example').read_text()
-for name in ['BOND_DB_PASSWORD', 'BOND_WRITER_PASSWORD', 'BOND_READER_PASSWORD', 'BOND_API_TOKEN']:
+for name in ['BOND_DB_PASSWORD', 'BOND_WRITER_PASSWORD', 'BOND_READER_PASSWORD']:
     text = text.replace(name + '=\n', name + '=' + secrets.token_hex(32) + '\n')
 fd = os.open('.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, 'w') as stream:
@@ -51,6 +51,13 @@ with os.fdopen(fd, 'w') as stream:
 PY
 fi
 chmod 600 .env
+
+# Install the host SQL client and defaults for new login shells.
+if ! command -v psql >/dev/null; then
+  apt-get update
+  NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends postgresql-client
+fi
 
 export SOURCE_REVISION
 SOURCE_REVISION=$(git rev-parse HEAD)
@@ -65,9 +72,18 @@ if [ -n "$("${compose[@]}" ps -q worker)" ]; then
 fi
 "${compose[@]}" up -d --wait --wait-timeout 120 postgres api
 "${compose[@]}" up -d worker
+# Use Compose's resolved port, including an existing .env override.
+db_endpoint=$("${compose[@]}" port postgres 5432)
+install -d -m 755 /etc/moex-bonds
+printf '[bonds]\nhost=127.0.0.1\nport=%s\ndbname=bonds\nuser=bond_reader\nconnect_timeout=5\n' \
+  "${db_endpoint##*:}" > /etc/moex-bonds/pg_service.conf
+chmod 644 /etc/moex-bonds/pg_service.conf
+install -m 644 deploy/moex-bonds-sql.sh /etc/profile.d/moex-bonds-sql.sh
+PGSERVICEFILE=/etc/moex-bonds/pg_service.conf PGSERVICE=bonds \
+  psql -X -w -v ON_ERROR_STOP=1 -c 'SELECT current_user, current_database();'
 "${compose[@]}" ps
 endpoint=$("${compose[@]}" port api 8000)
-curl --fail --silent --show-error --max-time 10 "http://${endpoint}/health"
+curl --fail --silent --show-error --max-time 10 "http://127.0.0.1:${endpoint##*:}/health"
 printf '%s\n' "$SOURCE_REVISION" > .git/moex-deployed-revision
 echo
 echo "Deployed ${SOURCE_REVISION}; API bound to ${endpoint}."

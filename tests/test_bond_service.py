@@ -205,24 +205,24 @@ def test_read_api_and_database_privileges(db, upstream, monkeypatch):
     pipeline.execute(db, args('--limit', '1'), run_id)
     monkeypatch.setenv('PGUSER', 'bond_reader')
     monkeypatch.setenv('PGPASSWORD', os.environ['TEST_READER_PASSWORD'])
-    monkeypatch.setenv('BOND_API_TOKEN', 'test-bearer-token')
+    monkeypatch.delenv('BOND_API_TOKEN', raising=False)
     with connect() as reader:
         with pytest.raises(psycopg.Error):
             reader.execute('DELETE FROM bond.runs')
     with TestClient(app) as client:
         assert client.get('/health').status_code == 200
-        assert client.get('/bonds').status_code == 401
-        headers = {'Authorization': 'Bearer test-bearer-token'}
-        response = client.get(f'/bonds/{ISIN}', headers=headers)
+        assert client.get('/bonds').status_code == 200
+        assert not client.get('/openapi.json').json().get('components', {}).get('securitySchemes')
+        response = client.get(f'/bonds/{ISIN}')
         assert response.status_code == 200
         assert response.json()['schedules']['payload'] == frame_payload(schedule())
         assert response.json()['cards']['run_id'] == str(run_id)
-        assert client.get('/calendar?start=2026-11-01&end=2026-11-02', headers=headers).json()[0]['coupon_amount'] is None
-        assert client.get(f'/bonds/{ISIN}/candles', headers=headers).status_code == 200
-        assert client.get(f'/bonds/{ISIN}?run_id={run_id}', headers=headers).status_code == 200
-        assert client.get('/bonds/NOT_FOUND', headers=headers).status_code == 404
-        assert client.get('/bonds?limit=1000000', headers=headers).status_code == 422
-        assert client.get('/calendar?start=2026-11-02&end=2026-11-01', headers=headers).status_code == 422
+        assert client.get('/calendar?start=2026-11-01&end=2026-11-02').json()[0]['coupon_amount'] is None
+        assert client.get(f'/bonds/{ISIN}/candles').status_code == 200
+        assert client.get(f'/bonds/{ISIN}?run_id={run_id}').status_code == 200
+        assert client.get('/bonds/NOT_FOUND').status_code == 404
+        assert client.get('/bonds?limit=1000000').status_code == 422
+        assert client.get('/calendar?start=2026-11-02&end=2026-11-01').status_code == 422
 
 
 def test_empty_market_fails_without_deleting_history(db, upstream, monkeypatch):

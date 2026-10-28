@@ -25,6 +25,9 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    command: [postgres, -c, hba_file=/etc/postgresql/bond_pg_hba.conf]
+    ports:
+      - "127.0.0.1:${BOND_DB_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: bonds
       POSTGRES_USER: bond_admin
@@ -33,6 +36,7 @@ services:
       BOND_READER_PASSWORD: ${BOND_READER_PASSWORD:?Set BOND_READER_PASSWORD}
     volumes:
       - bond-data:/var/lib/postgresql/data
+      - ./deploy/pg_hba.conf:/etc/postgresql/bond_pg_hba.conf:ro
       - ./deploy/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
     healthcheck:
       test: [CMD-SHELL, "pg_isready -h 127.0.0.1 -U bond_admin -d bonds"]
@@ -65,9 +69,8 @@ services:
       PGDATABASE: bonds
       PGUSER: bond_reader
       PGPASSWORD: ${BOND_READER_PASSWORD:?Set BOND_READER_PASSWORD}
-      BOND_API_TOKEN: ${BOND_API_TOKEN:?Set BOND_API_TOKEN}
     ports:
-      - "127.0.0.1:${BOND_API_PORT:-8793}:8000"
+      - "${BOND_API_HOST:-0.0.0.0}:${BOND_API_PORT:-8793}:8000"
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s
