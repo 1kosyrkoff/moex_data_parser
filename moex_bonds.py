@@ -5,6 +5,8 @@
   get_coupon_schedule — полное расписание выплат: купоны, амортизации, оферты, погашение
   get_bond_card      — все, что ISS знает о выпуске, словарем читаемых таблиц
   get_issuer_sector  — сектор экономики эмитента (по отраслевым индексам MOEX)
+  bond_kind          — род выпуска по ISIN или ссылке: вердикт, вид биржи, флаги
+  kind_from_schedule — род выпуска одним словом по готовому расписанию
 
 Схема расчета доходностей:
   ISIN -> SECID -> цена закрытия на дату оценки (история ISS) -> купонное расписание
@@ -31,7 +33,9 @@
     оферты в ISS их не различает, поэтому call отсекаем по CALLOPTIONDATE.
 """
 import datetime as dt
+import re
 from typing import Iterable, Optional, Union
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import pandas as pd
@@ -782,6 +786,269 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
     for column in SCHEDULE_NUMBERS:      # иначе пустые ячейки остаются None, а не NaN
         df[column] = pd.to_numeric(df[column], errors="coerce")
     return df.sort_values(["ISIN", "date"]).reset_index(drop=True)
+
+
+# ---------------------------------------------------------------- род выпуска
+
+FIXED, FLOATING, LINKER, AMORT, RMBS = "fixed", "floating", "linker", "amort", "rmbs"
+
+# Род — одно слово, а признаки у выпуска совмещаются: бывает амортизируемый флоатер и
+# секьюритизация с фиксированным купоном. Форма денежного потока информативнее вида
+# купона, поэтому rmbs, linker и amort перебивают floating. Полную картину флагами,
+# а не одним словом, отдает bond_kind.
+KIND_PRIORITY = (RMBS, LINKER, AMORT, FLOATING, FIXED)
+
+# BONDTYPE биржи -> род. Подписей у ISS два набора: у выпусков, выпавших из списка
+# рынка, остались старые ("Флоатер", "Амортизируемые облигации"), поэтому в словаре
+# оба, а ключи приведены к нижнему регистру. "Валютная облигация" — ось номинала,
+# про вид купона и форму погашения она не говорит ничего, поэтому рода не дает.
+MOEX_KINDS = {
+    "облигация с фиксированным (известным) купоном": FIXED,
+    "облигация с фиксированным (неизвестным) купоном": FIXED,
+    "структурная облигация": FIXED,
+    "конвертируемая облигация": FIXED,
+    "дисконтная облигация": FIXED,
+    "облигация с плавающим купоном": FLOATING,
+    "флоатер": FLOATING,
+    "линкер/облигация с индексируемым номиналом": LINKER,
+    "амортизируемая облигация": AMORT,
+    "амортизируемые облигации": AMORT,
+    "валютная облигация": None,
+}
+
+# Пороги подобраны на выборке 214 выпусков, по 28 на каждый BONDTYPE биржи; точность
+# разбора — в docstring kind_from_schedule. Менять их имеет смысл только с перепроверкой
+# на той же выборке: порознь признаки пересекаются, работает именно их порядок.
+RMBS_TRANCHES, RMBS_COVER, RMBS_SPREAD = 3, 0.9, 0.5
+FLOATER_UNKNOWN, FLOATER_CHANGES = 0.9, 0.5
+KOPECK = 0.005      # отклонение номинала от целого ниже этого — округление, не индексация
+
+# Субординированность биржа не публикует: слова "субординирован" нет в ISSUENAME ни
+# у одного из 3181 выпуска, и срочный суборд по данным ISS неотличим от обычного фикса.
+# Остаются бессрочность (Т1 иначе не выпускают) и маска тикера, которой банки помечают
+# такие выпуски сами. Регистр важен: без него "Т1" ловится в середине слов ("Роснфт1P1").
+SUBORD_MASK = re.compile(r"СУБ|АТ1|\d\s?Т[12]\b|Т[12]-|-Т[12]\b")
+MORTGAGE_MASK = re.compile(r"ипотечн|жилищн", re.I)
+PERPETUAL = "Бессрочные"
+
+# Слова пути ISS, которые сами похожи на код бумаги и в resolve_isin не проверяются
+_REF_WORDS = {"ISS", "SECURITIES", "BONDIZATION", "ISSUE", "INDEX", "INDICES", "HISTORY",
+              "AGGREGATES", "ENGINES", "MARKETS", "BOARDS", "STATISTICS", "ASPX"}
+_REF_CODE = re.compile(r"[A-Z0-9]{4,12}")
+
+
+def _code_isin(code: str) -> Optional[str]:
+    """Код бумаги -> ISIN. Код может быть и ISIN, и SECID: у ОФЗ они разные."""
+    if find_bond(code):
+        return code
+    fields = _block(_iss(f"securities/{code}.json", **{"iss.only": "description"}),
+                    "description")
+    if fields.empty:
+        return None
+    isin = dict(zip(fields["name"], fields["value"])).get("ISIN")
+    return (isin or "").strip().upper() or None
+
+
+def resolve_isin(ref: str) -> str:
+    """ISIN, SECID или ссылка на бумагу -> ISIN выпуска.
+
+    Понимает ISIN, SECID и ссылки, в которых есть код бумаги: и ISS
+    (iss.moex.com/iss/securities/SU26238RMFS4/bondization.json), и страницу выпуска
+    (moex.com/ru/issue.aspx?board=TQCB&code=RU000A105NN9). Из ссылки берется только код:
+    расписание все равно запрашивается у ISS заново, содержимое страницы не разбирается.
+    """
+    ref = str(ref).strip()
+    if not ref:
+        raise ValueError("пустая ссылка на выпуск")
+
+    if "/" in ref or "?" in ref or ":" in ref:
+        url = urlparse(ref if "://" in ref else "//" + ref)
+        query = parse_qs(url.query)
+        # код из параметра ссылки надежнее, чем из пути: в пути лежат и служебные слова
+        codes = [values[0] for key in ("code", "secid", "security", "SECID")
+                 for values in [query.get(key)] if values]
+        codes += [part for part in url.path.split("/") if part][::-1]
+    else:
+        codes = [ref]
+
+    for code in codes:
+        code = code.split(".")[0].strip().upper()
+        if code in _REF_WORDS or not _REF_CODE.fullmatch(code):
+            continue
+        isin = _code_isin(code)
+        if isin:
+            return isin
+    raise ValueError(f"код выпуска не найден на MOEX: {ref}")
+
+
+def _kind_features(schedule: pd.DataFrame) -> dict:
+    """Признаки рода выпуска, посчитанные ТОЛЬКО по его расписанию."""
+    missing = [c for c in ("date", "rate", "coupon_amount", "amort_amount", "FACEVALUE",
+                           "STARTDATE") if c not in schedule.columns]
+    if missing:
+        raise ValueError(f"это не расписание get_coupon_schedule: нет колонок {missing}")
+    if "ISIN" in schedule.columns and schedule["ISIN"].nunique(dropna=True) > 1:
+        raise ValueError("в расписании несколько ISIN; род определяется по одной бумаге")
+    if "STATUS" in schedule.columns and schedule["STATUS"].notna().any():
+        raise ValueError(f"расписание не прочитано: {schedule['STATUS'].dropna().iloc[0]}")
+
+    rows = schedule.sort_values("date")
+    today = pd.Timestamp(dt.date.today())
+    # купонную дату выдает STARTDATE: ISS отдает купонный период и у необъявленного купона
+    coupons = rows[rows["STARTDATE"].notna()]
+    unknown = list(coupons["rate"].isna())
+    known = coupons["rate"].dropna()
+    first = unknown.index(True) if True in unknown else None
+    amort = rows[rows["amort_amount"].fillna(0) > 0]
+    tranches = amort["amort_amount"]
+    past_coupons, past_amort = coupons[coupons["date"] <= today], amort[amort["date"] <= today]
+    face = rows["FACEVALUE"].dropna()
+    last_face = float(face.iloc[-1]) if len(face) else None
+
+    return {
+        "coupons": len(coupons),
+        "unknown": sum(unknown),
+        # доля необъявленных купонов: у флоатера объявлен только текущий, у бумаги
+        # с купоном до оферты — весь период до нее
+        "unknown_share": round(sum(unknown) / len(unknown), 4) if unknown else None,
+        "unknown_tail": first is not None and all(unknown[first:]),
+        # как часто меняется УЖЕ объявленная ставка: флоатер переставляет ее каждый
+        # период, фикс до оферты — только на оферте
+        "changes": round(float((known.diff().iloc[1:] != 0).mean()), 4) if len(known) > 1 else None,
+        "tranches": len(tranches),
+        # доля прошедших купонных дат, на которые пришелся транш: у секьюритизации
+        # номинал гасится каждый период, у плановой амортизации — в редкие даты
+        "cover": round(len(past_amort) / len(past_coupons), 4) if len(past_coupons) else None,
+        # разброс размеров транша: досрочные погашения неровные, плановые — равные доли
+        "spread": (round(float(tranches.std() / tranches.mean()), 4)
+                   if len(tranches) > 2 and tranches.mean() else None),
+        "face": last_face,
+        # индексируемый номинал почти никогда не целый, а у остальных видов копейки
+        # в номинале появляются только от амортизации — ее ловят tranches
+        "face_indexed": last_face is not None and abs(last_face - round(last_face)) > KOPECK,
+        "offers": int(rows[["OFFERPRICE", "OFFERSTART", "OFFEREND"]].notna().any(axis=1).sum())
+        if {"OFFERPRICE", "OFFERSTART", "OFFEREND"} <= set(rows.columns) else 0,
+    }
+
+
+def _kind(f: dict) -> str:
+    """Признаки расписания -> род, в порядке KIND_PRIORITY."""
+    if (f["tranches"] >= RMBS_TRANCHES and (f["cover"] or 0) >= RMBS_COVER
+            and (f["spread"] or 0) > RMBS_SPREAD):
+        return RMBS
+    # у линкера единственный транш, но он больше номинала выпуска: номинал проиндексирован.
+    # Хотя бы один объявленный купон обязателен — иначе под правило попадают транши SPV,
+    # у которых копейки в номинале от округления доли пула
+    if f["tranches"] <= 1 and f["face_indexed"] and (f["unknown_share"] or 0) < 1:
+        return LINKER
+    if f["tranches"] >= 2:
+        return AMORT
+    if (f["unknown_share"] or 0) >= FLOATER_UNKNOWN or (f["changes"] or 0) >= FLOATER_CHANGES:
+        return FLOATING
+    return FIXED
+
+
+def kind_from_schedule(schedule: pd.DataFrame) -> str:
+    """Род выпуска по одному купонному расписанию -> 'fixed'|'floating'|'linker'|'amort'|'rmbs'.
+
+    schedule — расписание РОВНО одной бумаги: get_coupon_schedule(isin) или
+    get_bond_card(isin)['schedule']. На нескольких ISIN сразу поднимает ValueError:
+    род — свойство выпуска, в пачке он у каждой бумаги свой.
+
+    Смотрит только на форму расписания, без обращений к ISS:
+      rmbs     — транш амортизации на каждой прошедшей купонной дате (cover >= 0.9)
+                 и размеры траншей неровные (spread > 0.5): так выглядит пул, который
+                 гасится досрочными платежами заемщиков, а не по плану;
+      linker   — транш один, но номинал нецелый: он проиндексирован, а не амортизирован;
+      amort    — траншей два и больше;
+      floating — объявлено меньше десятой части купонов, либо объявленная ставка меняется
+                 чаще чем через период;
+      fixed    — все остальное.
+
+    Приоритет именно такой (KIND_PRIORITY), потому что признаки совмещаются: у
+    амортизируемого флоатера расписание скажет amort, у секьюритизации с плавающим
+    купоном — rmbs. Это не ошибка разбора, а цена одного слова; флаги по всем осям
+    сразу отдает bond_kind.
+
+    Точность на выборке 214 выпусков (эталон — BONDTYPE биржи, по 28 на вид): 176 из 186
+    там, где эталон однозначен. По видам: linker 14/14, fixed 28/28, amort 28/28,
+    rmbs 25/28, floating 22/28, фикс до оферты 27/28 как fixed, структурные, дисконтные
+    и конвертируемые 32/32 как fixed. Валютные 28 штук в зачет не вошли: BONDTYPE у них
+    про номинал, рода он не задает.
+
+    Чего по расписанию не видно принципиально:
+      * флоатер против фикса с купоном только до оферты: у обоих будущие купоны
+        не объявлены. Их разделяет BONDTYPE, который и смотрит bond_kind;
+      * суборд и валюта номинала — в расписании их нет вовсе;
+      * младший транш секьюритизации без начавшейся амортизации выглядит флоатером,
+        а линкер, у которого индексация еще не набежала, — фиксом.
+    """
+    return _kind(_kind_features(schedule))
+
+
+def bond_kind(ref: str) -> dict:
+    """Род выпуска по ISIN или ссылке -> словарь: вердикт, классификация биржи, флаги.
+
+    ref — ISIN, SECID или ссылка на бумагу либо ее расписание (см. resolve_isin).
+
+    В отличие от kind_from_schedule берет не только расписание, но и паспорт выпуска,
+    поэтому различает то, чего в расписании нет: вид купона у амортизируемых бумаг,
+    валюту номинала, бессрочность, субординированность.
+
+    Ключи:
+      kind        — род по расписанию, одно слово из KIND_PRIORITY;
+      kind_moex   — род по BONDTYPE биржи; None у валютных: это ось номинала, а не рода;
+      BONDTYPE, BONDSUBTYPE — как их отдает ISS, без нормализации;
+      amort, floating, linker, rmbs — флаги по каждой оси отдельно, уже без приоритета:
+                    у амортизируемого флоатера подняты оба;
+      perpetual   — бессрочный выпуск;
+      subord      — ПОДОЗРЕНИЕ на суборд с причиной строкой, иначе None. Биржа
+                    субординированность не публикует вообще, так что это догадка по
+                    бессрочности и маске тикера: срочный Т2 так не находится;
+      currency    — валюта номинала, если она не рубль, иначе None;
+      qualified   — только для квалифицированных инвесторов;
+      features    — признаки расписания, по которым получен kind.
+    """
+    isin = resolve_isin(ref)
+    info = find_bond(isin)
+    if not info:
+        raise ValueError(f"ISIN {isin} не найден на MOEX")
+
+    passport = _block(_iss(f"securities/{info['SECID']}.json", **{"iss.only": "description"}),
+                      "description")
+    fields = dict(zip(passport["name"], passport["value"])) if not passport.empty else {}
+    bondtype = info.get("BONDTYPE") or fields.get("BOND_TYPE")
+    subtype = info.get("BONDSUBTYPE") or fields.get("BOND_SUBTYPE")
+    shortname = info.get("SHORTNAME") or fields.get("SHORTNAME") or ""
+    issuename = fields.get("ISSUENAME") or ""
+
+    features = _kind_features(get_coupon_schedule(isin))
+    kind = _kind(features)
+    moex = MOEX_KINDS.get((bondtype or "").strip().lower())
+
+    perpetual = subtype == PERPETUAL or not _date(fields.get("MATDATE"))
+    # бессрочным выпуск бывает только субординированным (Т1) или гибридным, маска
+    # тикера — то, чем банки помечают суборды сами; больше у ISS ничего нет
+    subord = ("бессрочный выпуск" if perpetual else
+              "маска тикера" if SUBORD_MASK.search(shortname) else None)
+    unit = fields.get("FACEUNIT") or info.get("FACEUNIT")
+
+    return {
+        "ISIN": isin, "SECID": info["SECID"], "SHORTNAME": shortname,
+        "kind": kind, "kind_moex": moex,
+        "BONDTYPE": bondtype, "BONDSUBTYPE": subtype,
+        "amort": features["tranches"] >= 2 or kind == RMBS or moex == AMORT,
+        # вид купона у амортизируемых и валютных бумаг BONDTYPE не показывает, зато
+        # необъявленные купоны в расписании видны всегда
+        "floating": kind == FLOATING or moex == FLOATING or features["unknown_tail"],
+        "linker": kind == LINKER or moex == LINKER,
+        "rmbs": kind == RMBS or bool(MORTGAGE_MASK.search(issuename)),
+        "perpetual": perpetual,
+        "subord": subord,
+        "currency": unit if unit and unit != "SUR" else None,
+        "qualified": str(fields.get("ISQUALIFIEDINVESTORS")) == "1",
+        "features": features,
+    }
 
 
 # ------------------------------------------------------------ карточка бумаги
