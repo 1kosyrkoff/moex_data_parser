@@ -7,6 +7,7 @@ quarterly_index — композит с дрейфующими весами и �
                   (спецификация: spec-quarterly-index.md).
 leveraged_index — доходность фонда с плечом: L в индексе, (1 - L) в деньгах под ставку овернайт.
 """
+
 import datetime as dt
 import math
 import numbers
@@ -22,16 +23,31 @@ PAGE = 500  # ISS отдает не более 500 свечей за запро�
 
 # псевдоним периода -> код интервала ISS ("m" — минуты, месяц это "1mo")
 PERIODS = {
-    "1m": 1, "10m": 10, "1h": 60, "1d": 24, "1w": 7, "1mo": 31, "1q": 4,
-    "min": 1, "hour": 60, "day": 24, "week": 7, "month": 31, "quarter": 4,
+    "1m": 1,
+    "10m": 10,
+    "1h": 60,
+    "1d": 24,
+    "1w": 7,
+    "1mo": 31,
+    "1q": 4,
+    "min": 1,
+    "hour": 60,
+    "day": 24,
+    "week": 7,
+    "month": 31,
+    "quarter": 4,
 }
 
 # подсказка редактору: эти значения всплывают в автодополнении period=...
 # (в PERIODS их больше — слова 'day', 'week' и коды ISS тоже принимаются)
 Period = Literal["1m", "10m", "1h", "1d", "1w", "1mo", "1q"]
 
-MSK = dt.timezone(dt.timedelta(hours=3))  # без перехода на летнее время, tzdata не нужна
-LAG = pd.Timedelta(days=10)  # сужение периода больше этого — предупреждение в custom_index и series_index
+MSK = dt.timezone(
+    dt.timedelta(hours=3)
+)  # без перехода на летнее время, tzdata не нужна
+LAG = pd.Timedelta(
+    days=10
+)  # сужение периода больше этого — предупреждение в custom_index и series_index
 
 S = requests.Session()
 S.headers.update({"User-Agent": "Mozilla/5.0 (research; MOEX ISS client)"})
@@ -62,13 +78,18 @@ def parse_date(value, name="date"):
             return dt.datetime.strptime(text, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    raise ValueError(f"Не понимаю {name}={value!r}, ожидается 'YYYY-MM-DD' или 'DD.MM.YYYY'")
+    raise ValueError(
+        f"Не понимаю {name}={value!r}, ожидается 'YYYY-MM-DD' или 'DD.MM.YYYY'"
+    )
 
 
 def find_board(ticker):
     """Ищет (engine, market, board) для тикера: акции -> TQBR, валюта -> CETS и т.д."""
-    r = S.get(f"{ISS}/securities/{ticker}.json",
-              params={"iss.meta": "off", "iss.only": "boards"}, timeout=30)
+    r = S.get(
+        f"{ISS}/securities/{ticker}.json",
+        params={"iss.meta": "off", "iss.only": "boards"},
+        timeout=30,
+    )
     r.raise_for_status()
     b = r.json()["boards"]
     df = pd.DataFrame(b["data"], columns=b["columns"])
@@ -79,9 +100,13 @@ def find_board(ticker):
     return row["engine"], row["market"], row["boardid"]
 
 
-def get_candles(ticker: str, start_date, finish_date,
-                period: Union[Period, int] = "1d",
-                board: str = None) -> pd.DataFrame:
+def get_candles(
+    ticker: str,
+    start_date,
+    finish_date,
+    period: Union[Period, int] = "1d",
+    board: str = None,
+) -> pd.DataFrame:
     """Свечи по тикеру за период -> DataFrame (индекс begin, колонки OHLC + value/volume).
 
     ticker      — 'SBER', 'CNYRUB_TOM', 'IMOEX', 'SU26238RMFS4', ...
@@ -101,8 +126,17 @@ def get_candles(ticker: str, start_date, finish_date,
 
     rows, columns, start = [], None, 0
     while True:  # ISS отдает свечи страницами по 500 штук
-        r = S.get(url, params={"iss.meta": "off", "from": start_date, "till": finish_date,
-                               "interval": interval_code(period), "start": start}, timeout=60)
+        r = S.get(
+            url,
+            params={
+                "iss.meta": "off",
+                "from": start_date,
+                "till": finish_date,
+                "interval": interval_code(period),
+                "start": start,
+            },
+            timeout=60,
+        )
         r.raise_for_status()
         c = r.json()["candles"]
         columns = c["columns"]
@@ -121,8 +155,9 @@ def get_candles(ticker: str, start_date, finish_date,
     return df[["ticker", "open", "high", "low", "close", "value", "volume", "end"]]
 
 
-def custom_index(weights: dict, start_date, finish_date, name: str, *,
-                 intraday: bool = False) -> pd.Series:
+def custom_index(
+    weights: dict, start_date, finish_date, name: str, *, intraday: bool = False
+) -> pd.Series:
     """Накопленная доходность взвешенного композита тикеров -> Series (индекс date, в долях).
 
     weights     — {'RUCBTRNS': 0.5, 'IMOEX': 0.5}: каждый вес > 0, сумма = 1
@@ -147,9 +182,15 @@ def custom_index(weights: dict, start_date, finish_date, name: str, *,
         key = str(ticker).strip().upper()
         if key in w:
             raise ValueError(f"weights: тикер {key} указан дважды")
-        if isinstance(weight, bool) or not isinstance(weight, numbers.Real) \
-                or not math.isfinite(weight) or weight <= 0:
-            raise ValueError(f"weights: вес {key} должен быть числом > 0, получено {weight!r}")
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, numbers.Real)
+            or not math.isfinite(weight)
+            or weight <= 0
+        ):
+            raise ValueError(
+                f"weights: вес {key} должен быть числом > 0, получено {weight!r}"
+            )
         w[key] = float(weight)
     total = math.fsum(w.values())
     if abs(total - 1) > 1e-9:  # допуск: 0.2 + 0.2 + 0.6 во float не равно 1
@@ -161,36 +202,68 @@ def custom_index(weights: dict, start_date, finish_date, name: str, *,
 
     closes = {}
     for ticker in w:
-        candles = get_candles(ticker, start, finish, "1d")  # борду определяет find_board
+        candles = get_candles(
+            ticker, start, finish, "1d"
+        )  # борду определяет find_board
         if not intraday:
             # у закрытых свечей end бывает и 23:59:55, поэтому незакрытую узнаем по дате
-            candles = candles[candles.index.normalize() < today] if len(candles) else candles
-        close = candles["close"].astype("float64").dropna() if len(candles) else pd.Series(dtype="float64")
+            candles = (
+                candles[candles.index.normalize() < today] if len(candles) else candles
+            )
+        close = (
+            candles["close"].astype("float64").dropna()
+            if len(candles)
+            else pd.Series(dtype="float64")
+        )
         if close.empty:
-            hint = ", свеча за сегодня отброшена (intraday=False)" if not intraday and finish >= today else ""
-            raise ValueError(f"{ticker}: нет котировок с {start:%d.%m.%Y} по {finish:%d.%m.%Y}{hint} — "
-                             "возможно, индекс больше не считается или еще не считался")
+            hint = (
+                ", свеча за сегодня отброшена (intraday=False)"
+                if not intraday and finish >= today
+                else ""
+            )
+            raise ValueError(
+                f"{ticker}: нет котировок с {start:%d.%m.%Y} по {finish:%d.%m.%Y}{hint} — "
+                "возможно, индекс больше не считается или еще не считался"
+            )
         if (close <= 0).any():
-            raise ValueError(f"{ticker}: котировка {close[close <= 0].iloc[0]} "
-                             f"на {close[close <= 0].index[0]:%d.%m.%Y}, доходность не определена")
+            raise ValueError(
+                f"{ticker}: котировка {close[close <= 0].iloc[0]} "
+                f"на {close[close <= 0].index[0]:%d.%m.%Y}, доходность не определена"
+            )
         closes[ticker] = close
 
     # доходности только после join: иначе, например, движение облигационного индекса
     # за субботу пропадет вместе с субботой, а не перейдет в доходность понедельника
     levels = pd.concat(closes, axis=1, join="inner").sort_index()
     if levels.empty:
-        ranges = "; ".join(f"{t} {s.index[0]:%d.%m.%Y}–{s.index[-1]:%d.%m.%Y}" for t, s in closes.items())
+        ranges = "; ".join(
+            f"{t} {s.index[0]:%d.%m.%Y}–{s.index[-1]:%d.%m.%Y}"
+            for t, s in closes.items()
+        )
         raise ValueError(f"{name}: у тикеров нет общих дат ({ranges})")
 
     first, last = levels.index[0], levels.index[-1]
     end = min(finish, today)
     if first - start > LAG or end - last > LAG:
-        causes = [f"{t} с {s.index[0]:%d.%m.%Y}" for t, s in closes.items() if s.index[0] - start > LAG]
-        causes += [f"{t} по {s.index[-1]:%d.%m.%Y}" for t, s in closes.items() if end - s.index[-1] > LAG]
-        warnings.warn(f"{name}: котировки {', '.join(causes) or 'у тикеров не пересекаются'}; "
-                      f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}", stacklevel=2)
+        causes = [
+            f"{t} с {s.index[0]:%d.%m.%Y}"
+            for t, s in closes.items()
+            if s.index[0] - start > LAG
+        ]
+        causes += [
+            f"{t} по {s.index[-1]:%d.%m.%Y}"
+            for t, s in closes.items()
+            if end - s.index[-1] > LAG
+        ]
+        warnings.warn(
+            f"{name}: котировки {', '.join(causes) or 'у тикеров не пересекаются'}; "
+            f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}",
+            stacklevel=2,
+        )
 
-    daily = (levels / levels.shift(1) - 1).fillna(0.0) @ pd.Series(w)  # первая дата — точка отсчета
+    daily = (levels / levels.shift(1) - 1).fillna(0.0) @ pd.Series(
+        w
+    )  # первая дата — точка отсчета
     growth = (1 + daily).cumprod() - 1
     growth.index = growth.index.normalize()
     growth.index.name = "date"
@@ -214,10 +287,13 @@ def _clean_series(s, label: str, positive: bool = True) -> pd.Series:
                 continue
             if isinstance(v, bool) or not isinstance(v, numbers.Real):
                 day = f"{key:%d.%m.%Y}" if isinstance(key, dt.date) else repr(key)
-                raise ValueError(f"{label}: значение не float/int: {day} → {v!r} ({type(v).__name__})")
+                raise ValueError(
+                    f"{label}: значение не float/int: {day} → {v!r} ({type(v).__name__})"
+                )
 
-    if pd.api.types.is_datetime64_any_dtype(s.index.dtype) \
-            or (s.index.dtype == object and all(isinstance(x, dt.date) for x in s.index)):
+    if pd.api.types.is_datetime64_any_dtype(s.index.dtype) or (
+        s.index.dtype == object and all(isinstance(x, dt.date) for x in s.index)
+    ):
         dates = pd.DatetimeIndex(s.index)
     else:
         raise ValueError(f"{label}: индекс должен быть датами, получен {s.index.dtype}")
@@ -229,18 +305,25 @@ def _clean_series(s, label: str, positive: bool = True) -> pd.Series:
         raise ValueError(f"{label}: ряд пуст после удаления NaN")
     v = v.astype("float64").sort_index(kind="stable")
     v.index = v.index.normalize()
-    v = v[~v.index.duplicated(keep="last")]  # после стабильной сортировки last = позднее время дня
+    v = v[
+        ~v.index.duplicated(keep="last")
+    ]  # после стабильной сортировки last = позднее время дня
     bad = v.abs() == math.inf
     if bad.any():
-        raise ValueError(f"{label}: значение {v[bad].iloc[0]} на {v[bad].index[0]:%d.%m.%Y}")
+        raise ValueError(
+            f"{label}: значение {v[bad].iloc[0]} на {v[bad].index[0]:%d.%m.%Y}"
+        )
     if positive and (v <= 0).any():
-        raise ValueError(f"{label}: значение {v[v <= 0].iloc[0]} "
-                         f"на {v[v <= 0].index[0]:%d.%m.%Y}, доходность не определена")
+        raise ValueError(
+            f"{label}: значение {v[v <= 0].iloc[0]} "
+            f"на {v[v <= 0].index[0]:%d.%m.%Y}, доходность не определена"
+        )
     return v
 
 
-def series_index(pairs, start_date=None, finish_date=None, name=None, *,
-                 cumulative: bool = False) -> pd.Series:
+def series_index(
+    pairs, start_date=None, finish_date=None, name=None, *, cumulative: bool = False
+) -> pd.Series:
     """Накопленная доходность взвешенного композита переданных рядов -> Series (индекс date, в долях).
 
     pairs       — [(ряд, вес), ...]: ряд — pd.Series с датами в индексе, вес > 0, сумма весов = 1
@@ -263,33 +346,65 @@ def series_index(pairs, start_date=None, finish_date=None, name=None, *,
     больше чем на 10 дней относительно заданной (не None) границы — UserWarning.
     В сообщениях ряд называется по Series.name, без имени — «ряд №N».
     """
-    if isinstance(pairs, (dict, pd.Series, pd.DataFrame, str)) or not hasattr(pairs, "__iter__"):
-        raise ValueError("pairs: нужен список пар [(ряд, вес), ...] "
-                         "(запись {ряд: вес} невозможна — pd.Series не может быть ключом словаря)")
+    if isinstance(pairs, (dict, pd.Series, pd.DataFrame, str)) or not hasattr(
+        pairs, "__iter__"
+    ):
+        raise ValueError(
+            "pairs: нужен список пар [(ряд, вес), ...] "
+            "(запись {ряд: вес} невозможна — pd.Series не может быть ключом словаря)"
+        )
     pairs = list(pairs)
     if not pairs:
         raise ValueError("pairs: нужен непустой список пар [(ряд, вес), ...]")
     labels, weights = [], []
     for i, pair in enumerate(pairs, 1):
         if not isinstance(pair, (tuple, list)) or len(pair) != 2:
-            got = f"{type(pair).__name__} длины {len(pair)}" if isinstance(pair, (tuple, list)) else type(pair).__name__
+            got = (
+                f"{type(pair).__name__} длины {len(pair)}"
+                if isinstance(pair, (tuple, list))
+                else type(pair).__name__
+            )
             raise ValueError(f"пара №{i}: ожидается (pd.Series, вес), получено {got}")
         s, weight = pair
-        label = str(s.name) if isinstance(s, pd.Series) and s.name is not None else f"ряд №{i}"
-        if isinstance(weight, bool) or not isinstance(weight, numbers.Real) \
-                or not math.isfinite(weight) or weight <= 0:
-            raise ValueError(f"{label}: вес должен быть числом > 0, получено {weight!r}")
+        label = (
+            str(s.name)
+            if isinstance(s, pd.Series) and s.name is not None
+            else f"ряд №{i}"
+        )
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, numbers.Real)
+            or not math.isfinite(weight)
+            or weight <= 0
+        ):
+            raise ValueError(
+                f"{label}: вес должен быть числом > 0, получено {weight!r}"
+            )
         labels.append(label)
         weights.append(float(weight))
     total = math.fsum(weights)
     if abs(total - 1) > 1e-9:  # допуск: 0.2 + 0.2 + 0.6 во float не равно 1
         raise ValueError(f"pairs: сумма весов {total:.10g}, а должна быть 1")
 
-    start = None if start_date is None else pd.Timestamp(parse_date(start_date, "start_date"))
-    finish = None if finish_date is None else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    start = (
+        None
+        if start_date is None
+        else pd.Timestamp(parse_date(start_date, "start_date"))
+    )
+    finish = (
+        None
+        if finish_date is None
+        else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    )
     if start is not None and finish is not None and start > finish:
-        raise ValueError(f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})")
-    period = " ".join(p for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}") if p)
+        raise ValueError(
+            f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})"
+        )
+    period = " ".join(
+        p
+        for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}")
+        if p
+    )
 
     values = []
     for (s, _), label in zip(pairs, labels):
@@ -301,18 +416,36 @@ def series_index(pairs, start_date=None, finish_date=None, name=None, *,
     # доходности только после join: иначе движение за даты, которых нет у других рядов, пропадет
     levels = pd.concat(dict(enumerate(values)), axis=1, join="inner").sort_index()
     if levels.empty:
-        ranges = "; ".join(f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values))
+        ranges = "; ".join(
+            f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+        )
         raise ValueError(f"{name}: у рядов нет общих дат ({ranges})")
 
     first, last = levels.index[0], levels.index[-1]
-    end = None if finish is None else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    end = (
+        None
+        if finish is None
+        else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    )
     late = start is not None and first - start > LAG
     early = end is not None and end - last > LAG
     if late or early:
-        causes = [f"{l} с {v.index[0]:%d.%m.%Y}" for l, v in zip(labels, values) if late and v.index[0] - start > LAG]
-        causes += [f"{l} по {v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values) if early and end - v.index[-1] > LAG]
-        warnings.warn(f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
-                      f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}", stacklevel=2)
+        causes = [
+            f"{l} с {v.index[0]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+            if late and v.index[0] - start > LAG
+        ]
+        causes += [
+            f"{l} по {v.index[-1]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+            if early and end - v.index[-1] > LAG
+        ]
+        warnings.warn(
+            f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
+            f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}",
+            stacklevel=2,
+        )
 
     if cumulative:
         # ставка предыдущей даты работает все календарные дни до текущей (пятница — 3 дня)
@@ -326,8 +459,16 @@ def series_index(pairs, start_date=None, finish_date=None, name=None, *,
     return growth
 
 
-def leveraged_index(index_series, rate_series, leverage=2.0, start_date=None, finish_date=None,
-                    name=None, *, funding_spread: float = 0.0) -> pd.Series:
+def leveraged_index(
+    index_series,
+    rate_series,
+    leverage=2.0,
+    start_date=None,
+    finish_date=None,
+    name=None,
+    *,
+    funding_spread: float = 0.0,
+) -> pd.Series:
     """Накопленная доходность фонда с плечом -> Series (индекс date, в долях), как в series_index.
 
     index_series   — уровни индекса (MEBCTR, RGBITR): pd.Series с датами в индексе
@@ -363,18 +504,38 @@ def leveraged_index(index_series, rate_series, leverage=2.0, start_date=None, fi
     В сообщениях ряды называются по Series.name, без имени — «индекс» и «ставка».
     """
     for value, arg in ((leverage, "leverage"), (funding_spread, "funding_spread")):
-        if isinstance(value, bool) or not isinstance(value, numbers.Real) or not math.isfinite(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, numbers.Real)
+            or not math.isfinite(value)
+        ):
             raise ValueError(f"{arg}: ожидается конечное число, получено {value!r}")
     leverage, funding_spread = float(leverage), float(funding_spread)
 
-    labels = [str(s.name) if isinstance(s, pd.Series) and s.name is not None else default
-              for s, default in ((index_series, "индекс"), (rate_series, "ставка"))]
+    labels = [
+        str(s.name) if isinstance(s, pd.Series) and s.name is not None else default
+        for s, default in ((index_series, "индекс"), (rate_series, "ставка"))
+    ]
 
-    start = None if start_date is None else pd.Timestamp(parse_date(start_date, "start_date"))
-    finish = None if finish_date is None else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    start = (
+        None
+        if start_date is None
+        else pd.Timestamp(parse_date(start_date, "start_date"))
+    )
+    finish = (
+        None
+        if finish_date is None
+        else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    )
     if start is not None and finish is not None and start > finish:
-        raise ValueError(f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})")
-    period = " ".join(p for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}") if p)
+        raise ValueError(
+            f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})"
+        )
+    period = " ".join(
+        p
+        for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}")
+        if p
+    )
 
     values = []
     for s, label, positive in zip((index_series, rate_series), labels, (True, False)):
@@ -386,38 +547,63 @@ def leveraged_index(index_series, rate_series, leverage=2.0, start_date=None, fi
     # доходности только после join: иначе движение за даты, которых нет у другого ряда, пропадет
     both = pd.concat(dict(enumerate(values)), axis=1, join="inner").sort_index()
     if both.empty:
-        ranges = "; ".join(f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values))
+        ranges = "; ".join(
+            f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+        )
         raise ValueError(f"{name}: у рядов нет общих дат ({ranges})")
 
     first, last = both.index[0], both.index[-1]
-    end = None if finish is None else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    end = (
+        None
+        if finish is None
+        else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    )
     late = start is not None and first - start > LAG
     early = end is not None and end - last > LAG
     if late or early:
-        causes = [f"{l} с {v.index[0]:%d.%m.%Y}" for l, v in zip(labels, values) if late and v.index[0] - start > LAG]
-        causes += [f"{l} по {v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values) if early and end - v.index[-1] > LAG]
-        warnings.warn(f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
-                      f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}", stacklevel=2)
+        causes = [
+            f"{l} с {v.index[0]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+            if late and v.index[0] - start > LAG
+        ]
+        causes += [
+            f"{l} по {v.index[-1]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+            if early and end - v.index[-1] > LAG
+        ]
+        warnings.warn(
+            f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
+            f"доходность посчитана с {first:%d.%m.%Y} по {last:%d.%m.%Y}",
+            stacklevel=2,
+        )
 
     px, rate = both[0], both[1]
-    if leverage > 1:                       # заемные деньги дороже ставки
+    if leverage > 1:  # заемные деньги дороже ставки
         rate = rate + funding_spread
-    elif leverage < 1:                     # свободные деньги размещаются дешевле ставки
+    elif leverage < 1:  # свободные деньги размещаются дешевле ставки
         rate = rate - funding_spread
     days = both.index.to_series().diff().dt.days
-    step = leverage * (px / px.shift(1) - 1) \
-        + (1 - leverage) * (rate.shift(1) / 100 * days / 365)
+    step = leverage * (px / px.shift(1) - 1) + (1 - leverage) * (
+        rate.shift(1) / 100 * days / 365
+    )
     if (step <= -1).any():
         bad = step.index[step <= -1][0]
-        raise ValueError(f"{name}: на {bad:%d.%m.%Y} шаг {step.loc[bad]:.4g}, плечо {leverage:g} "
-                         f"обнуляет капитал — дальше доходность не определена")
+        raise ValueError(
+            f"{name}: на {bad:%d.%m.%Y} шаг {step.loc[bad]:.4g}, плечо {leverage:g} "
+            f"обнуляет капитал — дальше доходность не определена"
+        )
     growth = (1 + step.fillna(0.0)).cumprod() - 1  # первая дата — точка отсчета
     growth.index.name = "date"
     growth.name = name
     return growth
 
 
-DATE_COLUMNS = ("tradedate", "date", "begin")  # колонки даты, если индекс фрейма не датовый
+DATE_COLUMNS = (
+    "tradedate",
+    "date",
+    "begin",
+)  # колонки даты, если индекс фрейма не датовый
 REBALANCE_MONTHS = (1, 4, 7, 10)  # месяцы квартальной ребалансировки в quarterly_index
 
 
@@ -431,28 +617,42 @@ def _as_series(obj, label: str) -> pd.Series:
     if isinstance(obj, pd.Series):
         return obj
     if not isinstance(obj, pd.DataFrame):
-        raise ValueError(f"{label}: ожидается pd.Series или pd.DataFrame, получено {type(obj).__name__}")
+        raise ValueError(
+            f"{label}: ожидается pd.Series или pd.DataFrame, получено {type(obj).__name__}"
+        )
 
     df = obj
     dated = pd.api.types.is_datetime64_any_dtype(df.index.dtype) or (
-        df.index.dtype == object and len(df.index) > 0
-        and all(isinstance(x, dt.date) for x in df.index))
+        df.index.dtype == object
+        and len(df.index) > 0
+        and all(isinstance(x, dt.date) for x in df.index)
+    )
     if not dated:
         found = [c for c in df.columns if str(c).strip().lower() in DATE_COLUMNS]
         if not found:
-            raise ValueError(f"{label}: индекс не датовый, колонки даты ({', '.join(DATE_COLUMNS)}) "
-                             f"тоже нет; есть {list(df.columns)}")
+            raise ValueError(
+                f"{label}: индекс не датовый, колонки даты ({', '.join(DATE_COLUMNS)}) "
+                f"тоже нет; есть {list(df.columns)}"
+            )
         if len(found) > 1:
-            raise ValueError(f"{label}: колонок даты несколько: {found}, непонятно какая нужна")
+            raise ValueError(
+                f"{label}: колонок даты несколько: {found}, непонятно какая нужна"
+            )
         df = df.set_index(found[0])
         if not pd.api.types.is_datetime64_any_dtype(df.index.dtype):
             # дата из строк неоднозначна: 01.02.2026 — это 1 февраля, а не 2 января
             df.index = pd.to_datetime(df.index, dayfirst=True)
 
-    numeric = [c for c in df.columns
-               if pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])]
+    numeric = [
+        c
+        for c in df.columns
+        if pd.api.types.is_numeric_dtype(df[c])
+        and not pd.api.types.is_bool_dtype(df[c])
+    ]
     if not numeric:
-        raise ValueError(f"{label}: во фрейме нет числовых колонок, есть {list(df.columns)}")
+        raise ValueError(
+            f"{label}: во фрейме нет числовых колонок, есть {list(df.columns)}"
+        )
     exact = [c for c in numeric if str(c).strip().lower() == "close"]
     prefixed = [c for c in numeric if str(c).strip().lower().startswith("close")]
     if len(exact) == 1:
@@ -462,8 +662,10 @@ def _as_series(obj, label: str) -> pd.Series:
     elif len(numeric) == 1:
         column = numeric[0]
     else:
-        raise ValueError(f"{label}: непонятно, какая колонка — значения ряда; числовые: {numeric}. "
-                         f"Передайте одну колонку: df.set_index('дата')['нужная']")
+        raise ValueError(
+            f"{label}: непонятно, какая колонка — значения ряда; числовые: {numeric}. "
+            f"Передайте одну колонку: df.set_index('дата')['нужная']"
+        )
     return df[column]
 
 
@@ -494,26 +696,48 @@ def _seed_values(start_values, labels) -> "np.ndarray":
                 parts.append(f"не хватает веток {missing}")
             if extra:
                 parts.append(f"лишние ключи {extra}")
-            raise ValueError(f"start_values: {', '.join(parts)}; ожидаются ровно {list(labels)}")
+            raise ValueError(
+                f"start_values: {', '.join(parts)}; ожидаются ровно {list(labels)}"
+            )
         raw = [table[l] for l in labels]
-    elif isinstance(start_values, (str, bytes)) or not hasattr(start_values, "__iter__"):
-        raise ValueError("start_values: нужен dict/pd.Series по именам веток или список по порядку pairs")
+    elif isinstance(start_values, (str, bytes)) or not hasattr(
+        start_values, "__iter__"
+    ):
+        raise ValueError(
+            "start_values: нужен dict/pd.Series по именам веток или список по порядку pairs"
+        )
     else:
         raw = list(start_values)
         if len(raw) != len(labels):
-            raise ValueError(f"start_values: {len(raw)} значений на {len(labels)} веток {list(labels)}")
+            raise ValueError(
+                f"start_values: {len(raw)} значений на {len(labels)} веток {list(labels)}"
+            )
     out = []
     for label, value in zip(labels, raw):
-        if isinstance(value, bool) or not isinstance(value, numbers.Real) \
-                or not math.isfinite(value) or value <= 0:
-            raise ValueError(f"start_values[{label!r}]: нужно число > 0, получено {value!r}")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, numbers.Real)
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(
+                f"start_values[{label!r}]: нужно число > 0, получено {value!r}"
+            )
         out.append(float(value))
     return np.array(out, dtype="float64")
 
 
-def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
-                    base: float = None, start_values=None, cumulative=None,
-                    cumulative_yield: bool = False) -> Union[pd.DataFrame, pd.Series]:
+def quarterly_index(
+    pairs,
+    start_date=None,
+    finish_date=None,
+    name=None,
+    *,
+    base: float = None,
+    start_values=None,
+    cumulative=None,
+    cumulative_yield: bool = False,
+) -> Union[pd.DataFrame, pd.Series]:
     """Композит с дрейфующими весами и квартальной ребалансировкой (спецификация: spec-quarterly-index.md).
 
     pairs        — [(ряд, вес), ...]: ряд — pd.Series или pd.DataFrame (даты из индекса либо из
@@ -560,9 +784,13 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     Ряд без данных или нет общих дат — ValueError. Сужение периода больше чем на 10 дней или
     уход стоимости ветки в ноль — UserWarning.
     """
-    if isinstance(pairs, (dict, pd.Series, pd.DataFrame, str)) or not hasattr(pairs, "__iter__"):
-        raise ValueError("pairs: нужен список пар [(ряд, вес), ...] "
-                         "(запись {ряд: вес} невозможна — pd.Series не может быть ключом словаря)")
+    if isinstance(pairs, (dict, pd.Series, pd.DataFrame, str)) or not hasattr(
+        pairs, "__iter__"
+    ):
+        raise ValueError(
+            "pairs: нужен список пар [(ряд, вес), ...] "
+            "(запись {ряд: вес} невозможна — pd.Series не может быть ключом словаря)"
+        )
     pairs = list(pairs)
     if not pairs:
         raise ValueError("pairs: нужен непустой список пар [(ряд, вес), ...]")
@@ -570,13 +798,22 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     objects, weights = [], []
     for i, pair in enumerate(pairs, 1):
         if not isinstance(pair, (tuple, list)) or len(pair) != 2:
-            got = f"{type(pair).__name__} длины {len(pair)}" if isinstance(pair, (tuple, list)) \
+            got = (
+                f"{type(pair).__name__} длины {len(pair)}"
+                if isinstance(pair, (tuple, list))
                 else type(pair).__name__
+            )
             raise ValueError(f"пара №{i}: ожидается (ряд, вес), получено {got}")
         obj, weight = pair
-        if isinstance(weight, bool) or not isinstance(weight, numbers.Real) \
-                or not math.isfinite(weight) or weight <= 0:
-            raise ValueError(f"пара №{i}: вес должен быть числом > 0, получено {weight!r}")
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, numbers.Real)
+            or not math.isfinite(weight)
+            or weight <= 0
+        ):
+            raise ValueError(
+                f"пара №{i}: вес должен быть числом > 0, получено {weight!r}"
+            )
         objects.append(obj)
         weights.append(float(weight))
     total = math.fsum(weights)
@@ -586,44 +823,76 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     if cumulative is None:
         flagged = []
     elif isinstance(cumulative, (pd.Series, pd.DataFrame)):
-        raise ValueError("cumulative: нужен список рядов [ряд, ...], а не сам ряд — "
-                         "list(DataFrame) дает имена колонок, и пометка молча не сработает")
-    elif isinstance(cumulative, (str, bytes, dict)) or not hasattr(cumulative, "__iter__"):
-        raise ValueError("cumulative: нужен список тех же объектов, что переданы в pairs")
+        raise ValueError(
+            "cumulative: нужен список рядов [ряд, ...], а не сам ряд — "
+            "list(DataFrame) дает имена колонок, и пометка молча не сработает"
+        )
+    elif isinstance(cumulative, (str, bytes, dict)) or not hasattr(
+        cumulative, "__iter__"
+    ):
+        raise ValueError(
+            "cumulative: нужен список тех же объектов, что переданы в pairs"
+        )
     else:
         flagged = list(cumulative)
     for k, item in enumerate(flagged, 1):
         if not any(obj is item for obj in objects):
-            raise ValueError(f"cumulative: элемент №{k} ({type(item).__name__}) не найден среди pairs. "
-                             "Сверка идет по identity (`is`): копия, срез или .copy() не подойдут — "
-                             "передайте в cumulative ровно тот объект, что лежит в pairs")
+            raise ValueError(
+                f"cumulative: элемент №{k} ({type(item).__name__}) не найден среди pairs. "
+                "Сверка идет по identity (`is`): копия, срез или .copy() не подойдут — "
+                "передайте в cumulative ровно тот объект, что лежит в pairs"
+            )
     is_rate = [any(obj is item for item in flagged) for obj in objects]
 
     if not isinstance(cumulative_yield, (bool, np.bool_)):
-        raise ValueError("cumulative_yield: нужен флаг True/False (вернуть накопленную доходность "
-                         f"вместо аудит-фрейма), получено {type(cumulative_yield).__name__} — "
-                         "ряды-ставки помечаются другим параметром, cumulative")
+        raise ValueError(
+            "cumulative_yield: нужен флаг True/False (вернуть накопленную доходность "
+            f"вместо аудит-фрейма), получено {type(cumulative_yield).__name__} — "
+            "ряды-ставки помечаются другим параметром, cumulative"
+        )
 
     if base is not None and start_values is not None:
-        raise ValueError("base и start_values вместе не задаются: base — старт с целевых весов, "
-                         "start_values — старт с уже дрейфовавших; выберите одно")
-    if base is not None and (isinstance(base, bool) or not isinstance(base, numbers.Real)
-                             or not math.isfinite(base) or base <= 0):
+        raise ValueError(
+            "base и start_values вместе не задаются: base — старт с целевых весов, "
+            "start_values — старт с уже дрейфовавших; выберите одно"
+        )
+    if base is not None and (
+        isinstance(base, bool)
+        or not isinstance(base, numbers.Real)
+        or not math.isfinite(base)
+        or base <= 0
+    ):
         raise ValueError(f"base: нужно число > 0, получено {base!r}")
 
-    start = None if start_date is None else pd.Timestamp(parse_date(start_date, "start_date"))
-    finish = None if finish_date is None else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    start = (
+        None
+        if start_date is None
+        else pd.Timestamp(parse_date(start_date, "start_date"))
+    )
+    finish = (
+        None
+        if finish_date is None
+        else pd.Timestamp(parse_date(finish_date, "finish_date"))
+    )
     if start is not None and finish is not None and start > finish:
-        raise ValueError(f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})")
-    period = " ".join(p for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}") if p)
+        raise ValueError(
+            f"start_date ({start:%d.%m.%Y}) позже finish_date ({finish:%d.%m.%Y})"
+        )
+    period = " ".join(
+        p
+        for p in (start and f"с {start:%d.%m.%Y}", finish and f"по {finish:%d.%m.%Y}")
+        if p
+    )
 
     labels, values = [], []
     for i, (obj, rate) in enumerate(zip(objects, is_rate), 1):
         raw = _as_series(obj, f"ряд №{i}")
         label = _branch_label(obj, raw, i)
         if label in labels:
-            raise ValueError(f"ряд №{i}: имя ветки {label!r} уже занято — колонки результата "
-                             "схлопнутся; задайте разные Series.name или имена колонок")
+            raise ValueError(
+                f"ряд №{i}: имя ветки {label!r} уже занято — колонки результата "
+                "схлопнутся; задайте разные Series.name или имена колонок"
+            )
         v = _clean_series(raw, label, positive=not rate).loc[start:finish]
         if v.empty:
             raise ValueError(f"{label}: нет данных {period}")
@@ -633,22 +902,37 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     # доходности только после join: иначе движение за даты, которых нет у других рядов, пропадет
     levels = pd.concat(dict(enumerate(values)), axis=1, join="inner").sort_index()
     if levels.empty:
-        ranges = "; ".join(f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}"
-                           for l, v in zip(labels, values))
+        ranges = "; ".join(
+            f"{l} {v.index[0]:%d.%m.%Y}–{v.index[-1]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+        )
         raise ValueError(f"{name}: у рядов нет общих дат ({ranges})")
     levels.columns = labels
 
     first, last = levels.index[0], levels.index[-1]
-    end = None if finish is None else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    end = (
+        None
+        if finish is None
+        else min(finish, pd.Timestamp(dt.datetime.now(MSK).date()))
+    )
     late = start is not None and first - start > LAG
     early = end is not None and end - last > LAG
     if late or early:
-        causes = [f"{l} с {v.index[0]:%d.%m.%Y}" for l, v in zip(labels, values)
-                  if late and v.index[0] - start > LAG]
-        causes += [f"{l} по {v.index[-1]:%d.%m.%Y}" for l, v in zip(labels, values)
-                   if early and end - v.index[-1] > LAG]
-        warnings.warn(f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
-                      f"индекс посчитан с {first:%d.%m.%Y} по {last:%d.%m.%Y}", stacklevel=2)
+        causes = [
+            f"{l} с {v.index[0]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+            if late and v.index[0] - start > LAG
+        ]
+        causes += [
+            f"{l} по {v.index[-1]:%d.%m.%Y}"
+            for l, v in zip(labels, values)
+            if early and end - v.index[-1] > LAG
+        ]
+        warnings.warn(
+            f"{name}: данные {', '.join(causes) or 'у рядов не пересекаются'}; "
+            f"индекс посчитан с {first:%d.%m.%Y} по {last:%d.%m.%Y}",
+            stacklevel=2,
+        )
 
     n, k = levels.shape
     w = np.array(weights, dtype="float64")
@@ -666,44 +950,64 @@ def quarterly_index(pairs, start_date=None, finish_date=None, name=None, *,
     # слепо к году, а shift(1) на первой строке дает NaN и ложную ребалансировку на старте
     year_month = (levels.index.year * 12 + levels.index.month).to_numpy()
     rebalance = np.zeros(n, dtype=bool)
-    rebalance[1:] = (year_month[1:] != year_month[:-1]) \
-        & np.isin(levels.index.month.to_numpy()[1:], REBALANCE_MONTHS)
+    rebalance[1:] = (year_month[1:] != year_month[:-1]) & np.isin(
+        levels.index.month.to_numpy()[1:], REBALANCE_MONTHS
+    )
 
     value = np.empty((n, k), dtype="float64")
     level = np.empty(n, dtype="float64")
-    value[0] = w * (100.0 if base is None else float(base)) if start_values is None \
+    value[0] = (
+        w * (100.0 if base is None else float(base))
+        if start_values is None
         else _seed_values(start_values, labels)
+    )
     level[0] = value[0].sum()
     for t in range(1, n):
         # на ребалансировке база — уровень предыдущего дня: портфель пересобран по его закрытию
-        value[t] = (level[t - 1] * w if rebalance[t] else value[t - 1]) * (1.0 + rets[t])
+        value[t] = (level[t - 1] * w if rebalance[t] else value[t - 1]) * (
+            1.0 + rets[t]
+        )
         level[t] = value[t].sum()
 
     spoiled = np.argwhere(value <= 0)
     if len(spoiled):
         t, j = spoiled[0]
         broken = "доходность" if cumulative_yield else "weight_*"
-        warnings.warn(f"{name}: стоимость ветки {labels[j]} стала {value[t, j]:.6g} "
-                      f"на {levels.index[t]:%d.%m.%Y}, дальше {broken} не имеет смысла", stacklevel=2)
+        warnings.warn(
+            f"{name}: стоимость ветки {labels[j]} стала {value[t, j]:.6g} "
+            f"на {levels.index[t]:%d.%m.%Y}, дальше {broken} не имеет смысла",
+            stacklevel=2,
+        )
 
-    if cumulative_yield:  # тот же объект, что отдает series_index, — служебных колонок нет
+    if (
+        cumulative_yield
+    ):  # тот же объект, что отдает series_index, — служебных колонок нет
         growth = pd.Series(level / level[0] - 1.0, index=levels.index.copy(), name=name)
         growth.index.name = "date"
         return growth
 
     column = "level" if name is None else str(name)
-    generated = ["rebalance"] + [f"{p}_{l}" for p in ("ret", "value", "weight") for l in labels]
+    generated = ["rebalance"] + [
+        f"{p}_{l}" for p in ("ret", "value", "weight") for l in labels
+    ]
     if column in generated:
-        raise ValueError(f"name={column!r} совпадает со служебной колонкой результата {generated}")
+        raise ValueError(
+            f"name={column!r} совпадает со служебной колонкой результата {generated}"
+        )
 
     out = pd.DataFrame(index=levels.index.copy())
     out.index.name = "date"
     out[column] = level
     out["rebalance"] = rebalance
-    for prefix, data in (("ret", rets), ("value", value), ("weight", value / level[:, None])):
+    for prefix, data in (
+        ("ret", rets),
+        ("value", value),
+        ("weight", value / level[:, None]),
+    ):
         for j, label in enumerate(labels):
             out[f"{prefix}_{label}"] = data[:, j]
     return out
+
 
 if __name__ == "__main__":
     print(get_candles("SBER", "2024-01-01", "2024-03-01", "1d").head())

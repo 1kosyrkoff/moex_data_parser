@@ -32,6 +32,7 @@
   * YTP — только к put-оферте. Оферту по решению эмитента (call) не считаем: тип
     оферты в ISS их не различает, поэтому call отсекаем по CALLOPTIONDATE.
 """
+
 import datetime as dt
 import re
 from typing import Iterable, Optional, Union
@@ -41,28 +42,51 @@ import requests
 import pandas as pd
 
 ISS = "https://iss.moex.com/iss"
-YEAR = 365.0        # база ACT/365, как в эффективной доходности MOEX
-LOOKBACK = 20       # на сколько дней назад искать цену, если в дату оценки сделок не было
+YEAR = 365.0  # база ACT/365, как в эффективной доходности MOEX
+LOOKBACK = 20  # на сколько дней назад искать цену, если в дату оценки сделок не было
 
 # какое поле истории считать ценой; берем первое непустое из цепочки
 PRICE_CHAINS = {
     "close": ["CLOSE"],
     "legal": ["LEGALCLOSEPRICE", "CLOSE"],
-    "mp3":   ["MARKETPRICE3", "LEGALCLOSEPRICE", "CLOSE"],
-    "wap":   ["WAPRICE", "CLOSE"],
+    "mp3": ["MARKETPRICE3", "LEGALCLOSEPRICE", "CLOSE"],
+    "wap": ["WAPRICE", "CLOSE"],
 }
 
 KNOWN, UNKNOWN = "known all coupons", "unknown coupons"
 
-COLUMNS = ["ISIN", "YTM", "YTP", "COUPONS", "SECID", "SHORTNAME", "DATE", "SETTLE",
-           "PRICE", "PRICE_DATE", "PRICE_FIELD", "ACCRUED", "FACEVALUE", "FACEUNIT",
-           "MATDATE", "PUTDATE", "EST_COUPONS", "STATUS"]
+COLUMNS = [
+    "ISIN",
+    "YTM",
+    "YTP",
+    "COUPONS",
+    "SECID",
+    "SHORTNAME",
+    "DATE",
+    "SETTLE",
+    "PRICE",
+    "PRICE_DATE",
+    "PRICE_FIELD",
+    "ACCRUED",
+    "FACEVALUE",
+    "FACEUNIT",
+    "MATDATE",
+    "PUTDATE",
+    "EST_COUPONS",
+    "STATUS",
+]
 
 S = requests.Session()
 S.headers.update({"User-Agent": "Mozilla/5.0 (research; MOEX ISS bonds client)"})
 
-_CACHE = {"market": None, "bondization": {}, "static": {}, "columns": {},
-          "sectors": None, "emitters": {}}
+_CACHE = {
+    "market": None,
+    "bondization": {},
+    "static": {},
+    "columns": {},
+    "sectors": None,
+    "emitters": {},
+}
 
 
 def _iss(path: str, **params) -> dict:
@@ -120,21 +144,27 @@ def parse_date(value, name="date") -> dt.date:
             return dt.datetime.strptime(text, fmt).date()
         except ValueError:
             continue
-    raise ValueError(f"Не понимаю {name}={value!r}, ожидается 'YYYY-MM-DD' или 'DD.MM.YYYY'")
+    raise ValueError(
+        f"Не понимаю {name}={value!r}, ожидается 'YYYY-MM-DD' или 'DD.MM.YYYY'"
+    )
 
 
 # ---------------------------------------------------------------- справочники
 
-MARKET_COLUMNS = ("SECID,ISIN,SHORTNAME,BOARDID,MATDATE,OFFERDATE,PUTOPTIONDATE,"
-                  "CALLOPTIONDATE,BUYBACKDATE,BUYBACKPRICE,FACEVALUE,FACEUNIT,"
-                  "COUPONPERCENT,BONDTYPE,BONDSUBTYPE")
+MARKET_COLUMNS = (
+    "SECID,ISIN,SHORTNAME,BOARDID,MATDATE,OFFERDATE,PUTOPTIONDATE,"
+    "CALLOPTIONDATE,BUYBACKDATE,BUYBACKPRICE,FACEVALUE,FACEUNIT,"
+    "COUPONPERCENT,BONDTYPE,BONDSUBTYPE"
+)
 
 
 def market_snapshot() -> pd.DataFrame:
     """Справочник всех торгуемых облигаций одним запросом (кешируется на сессию)."""
     if _CACHE["market"] is None:
-        payload = _iss("engines/stock/markets/bonds/securities.json",
-                       **{"iss.only": "securities", "securities.columns": MARKET_COLUMNS})
+        payload = _iss(
+            "engines/stock/markets/bonds/securities.json",
+            **{"iss.only": "securities", "securities.columns": MARKET_COLUMNS},
+        )
         df = _block(payload, "securities")
         _CACHE["market"] = df.drop_duplicates("SECID") if not df.empty else df
     return _CACHE["market"]
@@ -157,9 +187,17 @@ def find_bond(isin: str) -> Optional[dict]:
 
     if isin in _CACHE["static"]:
         return _CACHE["static"][isin]
-    found = _block(_iss("securities.json", q=isin, **{
-        "iss.only": "securities",
-        "securities.columns": "secid,isin,shortname,primary_boardid,is_traded"}), "securities")
+    found = _block(
+        _iss(
+            "securities.json",
+            q=isin,
+            **{
+                "iss.only": "securities",
+                "securities.columns": "secid,isin,shortname,primary_boardid,is_traded",
+            },
+        ),
+        "securities",
+    )
     if found.empty:
         return None
     found = found[found["isin"].fillna("").str.upper() == isin]
@@ -167,14 +205,27 @@ def find_bond(isin: str) -> Optional[dict]:
         return None
     secid = found.sort_values("is_traded", ascending=False).iloc[0]["secid"]
 
-    desc = _block(_iss(f"securities/{secid}.json", **{"iss.only": "description"}), "description")
+    desc = _block(
+        _iss(f"securities/{secid}.json", **{"iss.only": "description"}), "description"
+    )
     fields = dict(zip(desc["name"], desc["value"])) if not desc.empty else {}
-    row = {"SECID": secid, "ISIN": isin, "SHORTNAME": fields.get("SHORTNAME"),
-           "BOARDID": None, "MATDATE": fields.get("MATDATE"), "OFFERDATE": None,
-           "PUTOPTIONDATE": None, "CALLOPTIONDATE": None, "BUYBACKDATE": None,
-           "BUYBACKPRICE": None, "FACEVALUE": _num(fields.get("FACEVALUE")),
-           "FACEUNIT": fields.get("FACEUNIT"), "COUPONPERCENT": _num(fields.get("COUPONPERCENT")),
-           "BONDTYPE": fields.get("BOND_TYPE"), "BONDSUBTYPE": fields.get("BOND_SUBTYPE")}
+    row = {
+        "SECID": secid,
+        "ISIN": isin,
+        "SHORTNAME": fields.get("SHORTNAME"),
+        "BOARDID": None,
+        "MATDATE": fields.get("MATDATE"),
+        "OFFERDATE": None,
+        "PUTOPTIONDATE": None,
+        "CALLOPTIONDATE": None,
+        "BUYBACKDATE": None,
+        "BUYBACKPRICE": None,
+        "FACEVALUE": _num(fields.get("FACEVALUE")),
+        "FACEUNIT": fields.get("FACEUNIT"),
+        "COUPONPERCENT": _num(fields.get("COUPONPERCENT")),
+        "BONDTYPE": fields.get("BOND_TYPE"),
+        "BONDSUBTYPE": fields.get("BOND_SUBTYPE"),
+    }
     _CACHE["static"][isin] = row
     return row
 
@@ -183,35 +234,52 @@ def get_bondization(secid: str) -> dict:
     """Расписание выпуска -> {'coupons', 'amortizations', 'offers'} как DataFrame (кеш)."""
     if secid not in _CACHE["bondization"]:
         payload = _iss(f"securities/{secid}/bondization.json", limit="unlimited")
-        _CACHE["bondization"][secid] = {name: _block(payload, name)
-                                        for name in ("coupons", "amortizations", "offers")}
+        _CACHE["bondization"][secid] = {
+            name: _block(payload, name)
+            for name in ("coupons", "amortizations", "offers")
+        }
     return _CACHE["bondization"][secid]
 
 
 # ---------------------------------------------------------------------- цена
 
-HISTORY_COLUMNS = ("TRADEDATE,BOARDID,CLOSE,LEGALCLOSEPRICE,MARKETPRICE3,WAPRICE,"
-                   "ACCINT,FACEVALUE,BUYBACKDATE,NUMTRADES")
+HISTORY_COLUMNS = (
+    "TRADEDATE,BOARDID,CLOSE,LEGALCLOSEPRICE,MARKETPRICE3,WAPRICE,"
+    "ACCINT,FACEVALUE,BUYBACKDATE,NUMTRADES"
+)
 
 
-def _history(secid: str, start: dt.date, till: dt.date,
-             board: str = None) -> pd.DataFrame:
+def _history(
+    secid: str, start: dt.date, till: dt.date, board: str = None
+) -> pd.DataFrame:
     """Дневная история торгов выпуска за период -> DataFrame (может быть пустым).
 
     Без указания доски ISS отдает строки всех режимов сразу (у валютных выпусков это
     TQCB и TQOD с разными ценами), поэтому спрашиваем историю основной доски.
     """
-    path = (f"history/engines/stock/markets/bonds/boards/{board}/securities/{secid}.json"
-            if board else f"history/engines/stock/markets/bonds/securities/{secid}.json")
-    payload = _iss(path, **{"iss.only": "history", "history.columns": HISTORY_COLUMNS,
-                            "from": start.isoformat(), "till": till.isoformat()})
+    path = (
+        f"history/engines/stock/markets/bonds/boards/{board}/securities/{secid}.json"
+        if board
+        else f"history/engines/stock/markets/bonds/securities/{secid}.json"
+    )
+    payload = _iss(
+        path,
+        **{
+            "iss.only": "history",
+            "history.columns": HISTORY_COLUMNS,
+            "from": start.isoformat(),
+            "till": till.isoformat(),
+        },
+    )
     return _block(payload, "history")
 
 
 def _first_traded_row(secid: str, till: dt.date, board: str = None) -> Optional[dict]:
     """Первая рыночная цена выпуска — запасной вариант, когда сделок не было совсем."""
-    dates = _block(_iss(f"history/engines/stock/markets/bonds/securities/{secid}/dates.json"),
-                   "dates")
+    dates = _block(
+        _iss(f"history/engines/stock/markets/bonds/securities/{secid}/dates.json"),
+        "dates",
+    )
     start = _date(dates.iloc[0]["from"]) if not dates.empty else None
     if start is None or start > till:
         return None
@@ -222,8 +290,13 @@ def _first_traded_row(secid: str, till: dt.date, board: str = None) -> Optional[
     return None if traded.empty else traded.iloc[0].to_dict()
 
 
-def get_price(secid: str, date: dt.date, price: Union[str, float] = "close",
-              lookback: int = LOOKBACK, board: str = None) -> dict:
+def get_price(
+    secid: str,
+    date: dt.date,
+    price: Union[str, float] = "close",
+    lookback: int = LOOKBACK,
+    board: str = None,
+) -> dict:
     """Цена на дату оценки -> {'price', 'date', 'field', 'face', 'sessions'}.
 
     Ищем цену в дату оценки, при отсутствии сделок откатываемся назад на lookback дней,
@@ -236,23 +309,34 @@ def get_price(secid: str, date: dt.date, price: Union[str, float] = "close",
         return dict(found, price=float(price), date=date, field="задана вручную")
     fields = PRICE_CHAINS.get(str(price).lower(), PRICE_CHAINS["close"])
 
-    window = _history(secid, date - dt.timedelta(days=lookback),
-                      date + dt.timedelta(days=10), board)
+    window = _history(
+        secid, date - dt.timedelta(days=lookback), date + dt.timedelta(days=10), board
+    )
     if not window.empty:
         window = window.sort_values("TRADEDATE")
         found["sessions"] = [d for d in (_date(t) for t in window["TRADEDATE"]) if d]
         traded = window[[(_date(t) or date) <= date for t in window["TRADEDATE"]]]
-        for _, row in traded.iloc[::-1].iterrows():          # от даты оценки назад
+        for _, row in traded.iloc[::-1].iterrows():  # от даты оценки назад
             for field in fields:
                 value = _num(row.get(field))
                 if value:
-                    return dict(found, price=value, date=_date(row["TRADEDATE"]),
-                                field=field, face=_num(row.get("FACEVALUE")))
+                    return dict(
+                        found,
+                        price=value,
+                        date=_date(row["TRADEDATE"]),
+                        field=field,
+                        face=_num(row.get("FACEVALUE")),
+                    )
 
     first = _first_traded_row(secid, date, board)
     if first:
-        return dict(found, price=_num(first["CLOSE"]), date=_date(first["TRADEDATE"]),
-                    field="первая цена на рынке", face=_num(first.get("FACEVALUE")))
+        return dict(
+            found,
+            price=_num(first["CLOSE"]),
+            date=_date(first["TRADEDATE"]),
+            field="первая цена на рынке",
+            face=_num(first.get("FACEVALUE")),
+        )
     return found
 
 
@@ -268,12 +352,13 @@ def next_trading_day(date: dt.date, sessions: Iterable[dt.date] = ()) -> dt.date
     if future:
         return future[0]
     nxt = date + dt.timedelta(days=1)
-    while nxt.weekday() >= 5:                        # суббота и воскресенье
+    while nxt.weekday() >= 5:  # суббота и воскресенье
         nxt += dt.timedelta(days=1)
     return nxt
 
 
 # ------------------------------------------------------- расписание и потоки
+
 
 def _amort_pairs(amortizations: pd.DataFrame) -> list:
     """Погашения номинала -> [(дата, сумма), ...]."""
@@ -285,8 +370,9 @@ def _amort_pairs(amortizations: pd.DataFrame) -> list:
     return sorted(out)
 
 
-def normalize_amortizations(amortizations: pd.DataFrame, face: Optional[float],
-                            date: dt.date) -> pd.DataFrame:
+def normalize_amortizations(
+    amortizations: pd.DataFrame, face: Optional[float], date: dt.date
+) -> pd.DataFrame:
     """Приводит суммы амортизаций к номиналу, который биржа показывает на дату.
 
     В расписании ISS суммы бывают несогласованы с номиналом выпуска: у замещающих ОФЗ
@@ -304,8 +390,9 @@ def normalize_amortizations(amortizations: pd.DataFrame, face: Optional[float],
     return scaled
 
 
-def face_at(amortizations: pd.DataFrame, date: dt.date,
-            fallback: Optional[float] = None) -> float:
+def face_at(
+    amortizations: pd.DataFrame, date: dt.date, fallback: Optional[float] = None
+) -> float:
     """Непогашенный номинал на дату = сумма всех амортизаций после этой даты.
 
     fallback подставляется только при ПУСТОМ расписании — так бессрочные выпуски не
@@ -343,7 +430,9 @@ def _period_days(row) -> Optional[int]:
     return days if days > 0 else None
 
 
-def last_known_rate(coupons: pd.DataFrame, amortizations: pd.DataFrame) -> Optional[float]:
+def last_known_rate(
+    coupons: pd.DataFrame, amortizations: pd.DataFrame
+) -> Optional[float]:
     """Последняя известная купонная ставка, % годовых.
 
     Берем самый свежий объявленный купон, включая будущие: после оферты эмитент часто
@@ -373,9 +462,14 @@ def last_known_rate(coupons: pd.DataFrame, amortizations: pd.DataFrame) -> Optio
     return value / face * YEAR / days * 100
 
 
-def accrued_interest(coupons: pd.DataFrame, amortizations: pd.DataFrame, date: dt.date,
-                     rate: Optional[float], decimals: int = 2,
-                     face: Optional[float] = None) -> float:
+def accrued_interest(
+    coupons: pd.DataFrame,
+    amortizations: pd.DataFrame,
+    date: dt.date,
+    rate: Optional[float],
+    decimals: int = 2,
+    face: Optional[float] = None,
+) -> float:
     """НКД на дату оценки: часть текущего купона, накопленная с начала периода.
 
     Считаем сами, а не берем ACCRUEDINT/ACCINT из ISS: биржевое поле привязано к дате
@@ -396,9 +490,15 @@ def accrued_interest(coupons: pd.DataFrame, amortizations: pd.DataFrame, date: d
     return 0.0
 
 
-def bond_cashflows(bondization: dict, date: dt.date, till: dt.date,
-                   rate: Optional[float] = None, redemption_price: float = 100.0,
-                   decimals: int = 2, face: Optional[float] = None) -> pd.DataFrame:
+def bond_cashflows(
+    bondization: dict,
+    date: dt.date,
+    till: dt.date,
+    rate: Optional[float] = None,
+    redemption_price: float = 100.0,
+    decimals: int = 2,
+    face: Optional[float] = None,
+) -> pd.DataFrame:
     """Денежные потоки на одну облигацию после даты оценки -> DataFrame(date, amount, kind).
 
     till — дата выбытия бумаги (погашение или put-оферта): потоки после нее отбрасываются,
@@ -423,24 +523,31 @@ def bond_cashflows(bondization: dict, date: dt.date, till: dt.date,
         if when is None or when <= date or when > till:
             continue
         value = _num(r.get("value"))
-        if value is None:                                   # купон еще не объявлен
+        if value is None:  # купон еще не объявлен
             start, days = _date(r.get("startdate")), _period_days(r)
             outstanding = face_at(amortizations, start, face) if start else None
             if outstanding == 0:
-                estimated += 1      # номинал уже погашен: купон нулевой, поток пуст
+                estimated += 1  # номинал уже погашен: купон нулевой, поток пуст
                 continue
             if not rate or not days or outstanding is None:
-                lost += 1           # ставку перенести не с чего
+                lost += 1  # ставку перенести не с чего
                 continue
             value = round(outstanding * rate / 100 * days / YEAR, decimals)
             estimated += 1
         rows.append({"date": when, "amount": value, "kind": "coupon"})
 
     pairs = _amort_pairs(amortizations)
-    residual = round(sum(v for d, v in pairs if d >= till) if pairs else (face or 0.0), 6)
+    residual = round(
+        sum(v for d, v in pairs if d >= till) if pairs else (face or 0.0), 6
+    )
     if residual > 0:
-        rows.append({"date": till, "amount": residual * redemption_price / 100.0,
-                     "kind": "redemption"})
+        rows.append(
+            {
+                "date": till,
+                "amount": residual * redemption_price / 100.0,
+                "kind": "redemption",
+            }
+        )
 
     df = pd.DataFrame(rows, columns=["date", "amount", "kind"])
     if not df.empty:
@@ -449,8 +556,14 @@ def bond_cashflows(bondization: dict, date: dt.date, till: dt.date,
     return df
 
 
-def effective_yield(cashflows: pd.DataFrame, dirty_price: float, date: dt.date,
-                    lo: float = -0.999, hi: float = 1000.0, tol: float = 1e-12) -> Optional[float]:
+def effective_yield(
+    cashflows: pd.DataFrame,
+    dirty_price: float,
+    date: dt.date,
+    lo: float = -0.999,
+    hi: float = 1000.0,
+    tol: float = 1e-12,
+) -> Optional[float]:
     """Эффективная доходность, % годовых: NPV(потоки) = грязная цена, ACT/365, бисекция."""
     if cashflows is None or cashflows.empty or not dirty_price or dirty_price <= 0:
         return None
@@ -462,7 +575,7 @@ def effective_yield(cashflows: pd.DataFrame, dirty_price: float, date: dt.date,
     def npv(y):
         return sum(a / (1.0 + y) ** t for a, t in zip(amounts, times)) - dirty_price
 
-    if npv(lo) * npv(hi) > 0:      # корня на отрезке нет: цена вне диапазона потоков
+    if npv(lo) * npv(hi) > 0:  # корня на отрезке нет: цена вне диапазона потоков
         return None
     for _ in range(300):
         mid = (lo + hi) / 2
@@ -475,8 +588,13 @@ def effective_yield(cashflows: pd.DataFrame, dirty_price: float, date: dt.date,
     return round((lo + hi) / 2 * 100, 4)
 
 
-def put_date(info: dict, offers: pd.DataFrame, date: dt.date, maturity: Optional[dt.date],
-             buyback: Optional[dt.date] = None) -> tuple:
+def put_date(
+    info: dict,
+    offers: pd.DataFrame,
+    date: dt.date,
+    maturity: Optional[dt.date],
+    buyback: Optional[dt.date] = None,
+) -> tuple:
     """Ближайшая put-оферта после даты оценки -> (дата, цена выкупа в % от номинала).
 
     offertype в ISS не отличает put от call ('Оферта' стоит у обоих), поэтому call
@@ -487,8 +605,12 @@ def put_date(info: dict, offers: pd.DataFrame, date: dt.date, maturity: Optional
     price = _num(info.get("BUYBACKPRICE")) or 100.0
 
     def valid(when):
-        return (when and when > date and when != call
-                and (maturity is None or when < maturity))
+        return (
+            when
+            and when > date
+            and when != call
+            and (maturity is None or when < maturity)
+        )
 
     candidates = []
     for _, r in offers.iterrows():
@@ -496,7 +618,11 @@ def put_date(info: dict, offers: pd.DataFrame, date: dt.date, maturity: Optional
         if not valid(when) or "погашение" in str(r.get("offertype") or "").lower():
             continue
         candidates.append((when, _num(r.get("price")) or price))
-    for when in (buyback, _date(info.get("BUYBACKDATE")), _date(info.get("PUTOPTIONDATE"))):
+    for when in (
+        buyback,
+        _date(info.get("BUYBACKDATE")),
+        _date(info.get("PUTOPTIONDATE")),
+    ):
         if valid(when) and when not in [c[0] for c in candidates]:
             candidates.append((when, price))
     if not candidates:
@@ -504,14 +630,20 @@ def put_date(info: dict, offers: pd.DataFrame, date: dt.date, maturity: Optional
 
     nearest = min(c[0] for c in candidates)
     cluster = [c for c in candidates if (c[0] - nearest).days <= 5]
-    return max(cluster, key=lambda x: x[0])          # дата расчетов, а не сбора заявок
+    return max(cluster, key=lambda x: x[0])  # дата расчетов, а не сбора заявок
 
 
 # --------------------------------------------------------------------- API
 
-def get_bond_yields(isins: Iterable[str], date=None, price: Union[str, float, dict] = "close",
-                    lookback: int = LOOKBACK, assumed_rate: Optional[float] = None,
-                    details: bool = False) -> pd.DataFrame:
+
+def get_bond_yields(
+    isins: Iterable[str],
+    date=None,
+    price: Union[str, float, dict] = "close",
+    lookback: int = LOOKBACK,
+    assumed_rate: Optional[float] = None,
+    details: bool = False,
+) -> pd.DataFrame:
     """YTM и YTP по списку ISIN на дату оценки -> DataFrame.
 
     isins        — список ISIN, например ['RU000A0ZZ5H3', 'RU000A1032P1', 'RU000A1038V6']
@@ -536,11 +668,26 @@ def get_bond_yields(isins: Iterable[str], date=None, price: Union[str, float, di
 
     for isin in isins:
         isin = str(isin).strip().upper()
-        rec = {"ISIN": isin, "YTM": None, "YTP": None, "COUPONS": None,
-               "SECID": None, "SHORTNAME": None, "DATE": date, "SETTLE": None, "PRICE": None,
-               "PRICE_DATE": None, "PRICE_FIELD": None, "ACCRUED": None, "FACEVALUE": None,
-               "FACEUNIT": None, "MATDATE": None, "PUTDATE": None, "EST_COUPONS": 0,
-               "STATUS": "ok"}
+        rec = {
+            "ISIN": isin,
+            "YTM": None,
+            "YTP": None,
+            "COUPONS": None,
+            "SECID": None,
+            "SHORTNAME": None,
+            "DATE": date,
+            "SETTLE": None,
+            "PRICE": None,
+            "PRICE_DATE": None,
+            "PRICE_FIELD": None,
+            "ACCRUED": None,
+            "FACEVALUE": None,
+            "FACEUNIT": None,
+            "MATDATE": None,
+            "PUTDATE": None,
+            "EST_COUPONS": 0,
+            "STATUS": "ok",
+        }
         try:
             info = find_bond(isin)
             if not info:
@@ -548,8 +695,13 @@ def get_bond_yields(isins: Iterable[str], date=None, price: Union[str, float, di
                 rows.append(rec)
                 continue
             secid = info["SECID"]
-            rec.update({"SECID": secid, "SHORTNAME": info.get("SHORTNAME"),
-                        "FACEUNIT": info.get("FACEUNIT")})
+            rec.update(
+                {
+                    "SECID": secid,
+                    "SHORTNAME": info.get("SHORTNAME"),
+                    "FACEUNIT": info.get("FACEUNIT"),
+                }
+            )
 
             maturity = _date(info.get("MATDATE"))
             if maturity is not None and maturity <= date:
@@ -559,17 +711,26 @@ def get_bond_yields(isins: Iterable[str], date=None, price: Union[str, float, di
             rec["MATDATE"] = maturity
 
             bondization = get_bondization(secid)
-            coupons, amortizations = bondization["coupons"], bondization["amortizations"]
+            coupons, amortizations = (
+                bondization["coupons"],
+                bondization["amortizations"],
+            )
             if coupons.empty and amortizations.empty:
                 rec["STATUS"] = "нет купонного расписания в ISS"
                 rows.append(rec)
                 continue
 
-            quote = get_price(secid, date, prices.get(isin, price), lookback,
-                              info.get("BOARDID"))
+            quote = get_price(
+                secid, date, prices.get(isin, price), lookback, info.get("BOARDID")
+            )
             clean = quote["price"]
-            rec.update({"PRICE": clean, "PRICE_DATE": quote["date"],
-                        "PRICE_FIELD": quote["field"]})
+            rec.update(
+                {
+                    "PRICE": clean,
+                    "PRICE_DATE": quote["date"],
+                    "PRICE_FIELD": quote["field"],
+                }
+            )
             if clean is None:
                 rec["STATUS"] = f"нет цены за {lookback} дней до даты оценки"
                 rows.append(rec)
@@ -582,8 +743,9 @@ def get_bond_yields(isins: Iterable[str], date=None, price: Union[str, float, di
                 rows.append(rec)
                 continue
 
-            amortizations = normalize_amortizations(amortizations, quote["face"],
-                                                    quote["date"] or settle)
+            amortizations = normalize_amortizations(
+                amortizations, quote["face"], quote["date"] or settle
+            )
             bondization = dict(bondization, amortizations=amortizations)
             rate = assumed_rate or last_known_rate(coupons, amortizations)
             decimals = value_decimals(coupons)
@@ -598,40 +760,55 @@ def get_bond_yields(isins: Iterable[str], date=None, price: Union[str, float, di
             dirty = clean * face / 100.0 + nkd
 
             if maturity is not None:
-                flows = bond_cashflows(bondization, settle, maturity, rate,
-                                       decimals=decimals, face=face)
+                flows = bond_cashflows(
+                    bondization, settle, maturity, rate, decimals=decimals, face=face
+                )
                 rec["EST_COUPONS"] = flows.attrs["estimated"]
-                rec["COUPONS"] = UNKNOWN if (flows.attrs["estimated"] or
-                                             flows.attrs["lost"]) else KNOWN
+                rec["COUPONS"] = (
+                    UNKNOWN
+                    if (flows.attrs["estimated"] or flows.attrs["lost"])
+                    else KNOWN
+                )
                 if flows.attrs["lost"]:
                     # переносить нечего: ни одного объявленного купона у выпуска нет
-                    rec["STATUS"] = (f"ставка купона неизвестна, {flows.attrs['lost']} "
-                                     f"купонов не восстановлены")
+                    rec["STATUS"] = (
+                        f"ставка купона неизвестна, {flows.attrs['lost']} "
+                        f"купонов не восстановлены"
+                    )
                 else:
                     rec["YTM"] = effective_yield(flows, dirty, settle)
             else:
                 rec["COUPONS"] = UNKNOWN
-                rec["STATUS"] = "бессрочная бумага: доходность к погашению не определена"
+                rec["STATUS"] = (
+                    "бессрочная бумага: доходность к погашению не определена"
+                )
 
             put, put_price = put_date(info, bondization["offers"], settle, maturity)
             rec["PUTDATE"] = put
             if put:
-                put_flows = bond_cashflows(bondization, settle, put, rate,
-                                           redemption_price=put_price,
-                                           decimals=decimals, face=face)
+                put_flows = bond_cashflows(
+                    bondization,
+                    settle,
+                    put,
+                    rate,
+                    redemption_price=put_price,
+                    decimals=decimals,
+                    face=face,
+                )
                 if not put_flows.attrs["lost"]:
                     rec["YTP"] = effective_yield(put_flows, dirty, settle)
         except requests.RequestException as e:
             rec["STATUS"] = f"ошибка запроса: {e}"
-        except Exception as e:                  # noqa: BLE001 — одна битая бумага не роняет пачку
+        except Exception as e:  # noqa: BLE001 — одна битая бумага не роняет пачку
             rec["STATUS"] = f"ошибка расчета: {e}"
         rows.append(rec)
 
-    df = pd.DataFrame(rows, columns=COLUMNS)          # columns держит порядок и пустой список
+    df = pd.DataFrame(rows, columns=COLUMNS)  # columns держит порядок и пустой список
     return df if details else df[COLUMNS[:4]]
 
 
 # ------------------------------------------------------- купонное расписание
+
 
 def _total(*values) -> Optional[float]:
     """Сумма непустых слагаемых; все пустые -> None, а не 0: выплаты в этот день нет."""
@@ -639,16 +816,47 @@ def _total(*values) -> Optional[float]:
     return round(sum(known), 8) if known else None
 
 
-SCHEDULE_COLUMNS = ["ISIN", "SECID", "SHORTNAME", "date", "coupon_amount", "rate",
-                    "amort_amount", "total_amount", "FACEVALUE", "FACEUNIT", "STARTDATE",
-                    "RECORDDATE", "OFFERPRICE", "offer_amount", "OFFERSTART", "OFFEREND",
-                    "CALLOPTIONDATE", "PUTOPTIONDATE", "STATUS"]
+SCHEDULE_COLUMNS = [
+    "ISIN",
+    "SECID",
+    "SHORTNAME",
+    "date",
+    "coupon_amount",
+    "rate",
+    "amort_amount",
+    "total_amount",
+    "FACEVALUE",
+    "FACEUNIT",
+    "STARTDATE",
+    "RECORDDATE",
+    "OFFERPRICE",
+    "offer_amount",
+    "OFFERSTART",
+    "OFFEREND",
+    "CALLOPTIONDATE",
+    "PUTOPTIONDATE",
+    "STATUS",
+]
 
-SCHEDULE_DATES = ["date", "STARTDATE", "RECORDDATE", "OFFERSTART", "OFFEREND",
-                  "CALLOPTIONDATE", "PUTOPTIONDATE"]
+SCHEDULE_DATES = [
+    "date",
+    "STARTDATE",
+    "RECORDDATE",
+    "OFFERSTART",
+    "OFFEREND",
+    "CALLOPTIONDATE",
+    "PUTOPTIONDATE",
+]
 
-SCHEDULE_NUMBERS = ["coupon_amount", "rate", "amort_amount", "total_amount", "FACEVALUE",
-                    "OFFERPRICE", "offer_amount"]
+SCHEDULE_NUMBERS = [
+    "coupon_amount",
+    "rate",
+    "amort_amount",
+    "total_amount",
+    "FACEVALUE",
+    "OFFERPRICE",
+    "offer_amount",
+]
 
 
 def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
@@ -714,14 +922,22 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
             if not info:
                 rows.append(dict(base, STATUS="не найден на MOEX"))
                 continue
-            base.update({"SECID": info["SECID"], "SHORTNAME": info.get("SHORTNAME"),
-                         "FACEUNIT": info.get("FACEUNIT")})
+            base.update(
+                {
+                    "SECID": info["SECID"],
+                    "SHORTNAME": info.get("SHORTNAME"),
+                    "FACEUNIT": info.get("FACEUNIT"),
+                }
+            )
 
             bondization = get_bondization(info["SECID"])
             maturity = _date(info.get("MATDATE"))
-            put, call = _date(info.get("PUTOPTIONDATE")), _date(info.get("CALLOPTIONDATE"))
-            amortizations = normalize_amortizations(bondization["amortizations"],
-                                                    _num(info.get("FACEVALUE")), today)
+            put, call = _date(info.get("PUTOPTIONDATE")), _date(
+                info.get("CALLOPTIONDATE")
+            )
+            amortizations = normalize_amortizations(
+                bondization["amortizations"], _num(info.get("FACEVALUE")), today
+            )
             pairs = _amort_pairs(amortizations)
             events, coupon_dates = {}, set()
 
@@ -731,7 +947,9 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
 
             def outstanding(when, pairs=pairs):
                 """Номинал, действующий на дату: транш этой даты еще не выплачен."""
-                return round(sum(v for d, v in pairs if d >= when), 8) if pairs else None
+                return (
+                    round(sum(v for d, v in pairs if d >= when), 8) if pairs else None
+                )
 
             for _, r in bondization["coupons"].iterrows():
                 when = _date(r.get("coupondate"))
@@ -739,10 +957,12 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
                     continue
                 coupon_dates.add(when)
                 row = event(when)
-                row.update(coupon_amount=_total(row["coupon_amount"], _num(r.get("value"))),
-                           rate=_num(r.get("valueprc")),
-                           STARTDATE=_date(r.get("startdate")),
-                           RECORDDATE=_date(r.get("recorddate")))
+                row.update(
+                    coupon_amount=_total(row["coupon_amount"], _num(r.get("value"))),
+                    rate=_num(r.get("valueprc")),
+                    STARTDATE=_date(r.get("startdate")),
+                    RECORDDATE=_date(r.get("recorddate")),
+                )
 
             redeemed = False
             for when, value in pairs:
@@ -752,8 +972,9 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
             if maturity and not redeemed:
                 # номинал разошелся амортизацией до даты погашения — выпуск все равно гасится
                 row = event(maturity)
-                row["amort_amount"] = _total(row["amort_amount"],
-                                             outstanding(maturity) or 0.0)
+                row["amort_amount"] = _total(
+                    row["amort_amount"], outstanding(maturity) or 0.0
+                )
 
             for _, r in bondization["offers"].iterrows():
                 when = _date(r.get("offerdate"))
@@ -762,28 +983,34 @@ def get_coupon_schedule(isins: Iterable[str]) -> pd.DataFrame:
                 row = event(when)
                 price, face = _num(r.get("price")), outstanding(when)
                 buyback = round(face * price / 100, 8) if price and face else None
-                row.update(OFFERPRICE=price, offer_amount=buyback,
-                           OFFERSTART=_date(r.get("offerdatestart")),
-                           OFFEREND=_date(r.get("offerdateend")))
+                row.update(
+                    OFFERPRICE=price,
+                    offer_amount=buyback,
+                    OFFERSTART=_date(r.get("offerdatestart")),
+                    OFFEREND=_date(r.get("offerdateend")),
+                )
 
             for when, row in sorted(events.items()):
                 row["FACEVALUE"] = outstanding(when)
                 # необъявленный купон делает неизвестной всю выплату дня, а не только себя
                 unknown = when in coupon_dates and row["coupon_amount"] is None
-                row["total_amount"] = None if unknown else \
-                    _total(row["coupon_amount"], row["amort_amount"])
+                row["total_amount"] = (
+                    None
+                    if unknown
+                    else _total(row["coupon_amount"], row["amort_amount"])
+                )
                 row["CALLOPTIONDATE"] = call if call == when else None
                 row["PUTOPTIONDATE"] = put if put == when else None
                 rows.append(row)
         except requests.RequestException as e:
             rows.append(dict(base, STATUS=f"ошибка запроса: {e}"))
-        except Exception as e:              # noqa: BLE001 — одна битая бумага не роняет пачку
+        except Exception as e:  # noqa: BLE001 — одна битая бумага не роняет пачку
             rows.append(dict(base, STATUS=f"ошибка разбора: {e}"))
 
     df = pd.DataFrame(rows, columns=SCHEDULE_COLUMNS)
     for column in SCHEDULE_DATES:
         df[column] = pd.to_datetime(df[column], errors="coerce")
-    for column in SCHEDULE_NUMBERS:      # иначе пустые ячейки остаются None, а не NaN
+    for column in SCHEDULE_NUMBERS:  # иначе пустые ячейки остаются None, а не NaN
         df[column] = pd.to_numeric(df[column], errors="coerce")
     return df.sort_values(["ISIN", "date"]).reset_index(drop=True)
 
@@ -821,7 +1048,7 @@ MOEX_KINDS = {
 # на той же выборке: порознь признаки пересекаются, работает именно их порядок.
 RMBS_TRANCHES, RMBS_COVER, RMBS_SPREAD = 3, 0.9, 0.5
 FLOATER_UNKNOWN, FLOATER_CHANGES = 0.9, 0.5
-KOPECK = 0.005      # отклонение номинала от целого ниже этого — округление, не индексация
+KOPECK = 0.005  # отклонение номинала от целого ниже этого — округление, не индексация
 
 # Субординированность биржа не публикует: слова "субординирован" нет в ISSUENAME ни
 # у одного из 3181 выпуска, и срочный суборд по данным ISS неотличим от обычного фикса.
@@ -832,8 +1059,21 @@ MORTGAGE_MASK = re.compile(r"ипотечн|жилищн", re.I)
 PERPETUAL = "Бессрочные"
 
 # Слова пути ISS, которые сами похожи на код бумаги и в resolve_isin не проверяются
-_REF_WORDS = {"ISS", "SECURITIES", "BONDIZATION", "ISSUE", "INDEX", "INDICES", "HISTORY",
-              "AGGREGATES", "ENGINES", "MARKETS", "BOARDS", "STATISTICS", "ASPX"}
+_REF_WORDS = {
+    "ISS",
+    "SECURITIES",
+    "BONDIZATION",
+    "ISSUE",
+    "INDEX",
+    "INDICES",
+    "HISTORY",
+    "AGGREGATES",
+    "ENGINES",
+    "MARKETS",
+    "BOARDS",
+    "STATISTICS",
+    "ASPX",
+}
 _REF_CODE = re.compile(r"[A-Z0-9]{4,12}")
 
 
@@ -841,8 +1081,9 @@ def _code_isin(code: str) -> Optional[str]:
     """Код бумаги -> ISIN. Код может быть и ISIN, и SECID: у ОФЗ они разные."""
     if find_bond(code):
         return code
-    fields = _block(_iss(f"securities/{code}.json", **{"iss.only": "description"}),
-                    "description")
+    fields = _block(
+        _iss(f"securities/{code}.json", **{"iss.only": "description"}), "description"
+    )
     if fields.empty:
         return None
     isin = dict(zip(fields["name"], fields["value"])).get("ISIN")
@@ -865,8 +1106,12 @@ def resolve_isin(ref: str) -> str:
         url = urlparse(ref if "://" in ref else "//" + ref)
         query = parse_qs(url.query)
         # код из параметра ссылки надежнее, чем из пути: в пути лежат и служебные слова
-        codes = [values[0] for key in ("code", "secid", "security", "SECID")
-                 for values in [query.get(key)] if values]
+        codes = [
+            values[0]
+            for key in ("code", "secid", "security", "SECID")
+            for values in [query.get(key)]
+            if values
+        ]
         codes += [part for part in url.path.split("/") if part][::-1]
     else:
         codes = [ref]
@@ -883,14 +1128,30 @@ def resolve_isin(ref: str) -> str:
 
 def _kind_features(schedule: pd.DataFrame) -> dict:
     """Признаки рода выпуска, посчитанные ТОЛЬКО по его расписанию."""
-    missing = [c for c in ("date", "rate", "coupon_amount", "amort_amount", "FACEVALUE",
-                           "STARTDATE") if c not in schedule.columns]
+    missing = [
+        c
+        for c in (
+            "date",
+            "rate",
+            "coupon_amount",
+            "amort_amount",
+            "FACEVALUE",
+            "STARTDATE",
+        )
+        if c not in schedule.columns
+    ]
     if missing:
-        raise ValueError(f"это не расписание get_coupon_schedule: нет колонок {missing}")
+        raise ValueError(
+            f"это не расписание get_coupon_schedule: нет колонок {missing}"
+        )
     if "ISIN" in schedule.columns and schedule["ISIN"].nunique(dropna=True) > 1:
-        raise ValueError("в расписании несколько ISIN; род определяется по одной бумаге")
+        raise ValueError(
+            "в расписании несколько ISIN; род определяется по одной бумаге"
+        )
     if "STATUS" in schedule.columns and schedule["STATUS"].notna().any():
-        raise ValueError(f"расписание не прочитано: {schedule['STATUS'].dropna().iloc[0]}")
+        raise ValueError(
+            f"расписание не прочитано: {schedule['STATUS'].dropna().iloc[0]}"
+        )
 
     rows = schedule.sort_values("date")
     today = pd.Timestamp(dt.date.today())
@@ -901,7 +1162,10 @@ def _kind_features(schedule: pd.DataFrame) -> dict:
     first = unknown.index(True) if True in unknown else None
     amort = rows[rows["amort_amount"].fillna(0) > 0]
     tranches = amort["amort_amount"]
-    past_coupons, past_amort = coupons[coupons["date"] <= today], amort[amort["date"] <= today]
+    past_coupons, past_amort = (
+        coupons[coupons["date"] <= today],
+        amort[amort["date"] <= today],
+    )
     face = rows["FACEVALUE"].dropna()
     last_face = float(face.iloc[-1]) if len(face) else None
 
@@ -914,27 +1178,45 @@ def _kind_features(schedule: pd.DataFrame) -> dict:
         "unknown_tail": first is not None and all(unknown[first:]),
         # как часто меняется УЖЕ объявленная ставка: флоатер переставляет ее каждый
         # период, фикс до оферты — только на оферте
-        "changes": round(float((known.diff().iloc[1:] != 0).mean()), 4) if len(known) > 1 else None,
+        "changes": (
+            round(float((known.diff().iloc[1:] != 0).mean()), 4)
+            if len(known) > 1
+            else None
+        ),
         "tranches": len(tranches),
         # доля прошедших купонных дат, на которые пришелся транш: у секьюритизации
         # номинал гасится каждый период, у плановой амортизации — в редкие даты
-        "cover": round(len(past_amort) / len(past_coupons), 4) if len(past_coupons) else None,
+        "cover": (
+            round(len(past_amort) / len(past_coupons), 4) if len(past_coupons) else None
+        ),
         # разброс размеров транша: досрочные погашения неровные, плановые — равные доли
-        "spread": (round(float(tranches.std() / tranches.mean()), 4)
-                   if len(tranches) > 2 and tranches.mean() else None),
+        "spread": (
+            round(float(tranches.std() / tranches.mean()), 4)
+            if len(tranches) > 2 and tranches.mean()
+            else None
+        ),
         "face": last_face,
         # индексируемый номинал почти никогда не целый, а у остальных видов копейки
         # в номинале появляются только от амортизации — ее ловят tranches
-        "face_indexed": last_face is not None and abs(last_face - round(last_face)) > KOPECK,
-        "offers": int(rows[["OFFERPRICE", "OFFERSTART", "OFFEREND"]].notna().any(axis=1).sum())
-        if {"OFFERPRICE", "OFFERSTART", "OFFEREND"} <= set(rows.columns) else 0,
+        "face_indexed": last_face is not None
+        and abs(last_face - round(last_face)) > KOPECK,
+        "offers": (
+            int(
+                rows[["OFFERPRICE", "OFFERSTART", "OFFEREND"]].notna().any(axis=1).sum()
+            )
+            if {"OFFERPRICE", "OFFERSTART", "OFFEREND"} <= set(rows.columns)
+            else 0
+        ),
     }
 
 
 def _kind(f: dict) -> str:
     """Признаки расписания -> род, в порядке KIND_PRIORITY."""
-    if (f["tranches"] >= RMBS_TRANCHES and (f["cover"] or 0) >= RMBS_COVER
-            and (f["spread"] or 0) > RMBS_SPREAD):
+    if (
+        f["tranches"] >= RMBS_TRANCHES
+        and (f["cover"] or 0) >= RMBS_COVER
+        and (f["spread"] or 0) > RMBS_SPREAD
+    ):
         return RMBS
     # у линкера единственный транш, но он больше номинала выпуска: номинал проиндексирован.
     # Хотя бы один объявленный купон обязателен — иначе под правило попадают транши SPV,
@@ -943,7 +1225,9 @@ def _kind(f: dict) -> str:
         return LINKER
     if f["tranches"] >= 2:
         return AMORT
-    if (f["unknown_share"] or 0) >= FLOATER_UNKNOWN or (f["changes"] or 0) >= FLOATER_CHANGES:
+    if (f["unknown_share"] or 0) >= FLOATER_UNKNOWN or (
+        f["changes"] or 0
+    ) >= FLOATER_CHANGES:
         return FLOATING
     return FIXED
 
@@ -1014,9 +1298,13 @@ def bond_kind(ref: str) -> dict:
     if not info:
         raise ValueError(f"ISIN {isin} не найден на MOEX")
 
-    passport = _block(_iss(f"securities/{info['SECID']}.json", **{"iss.only": "description"}),
-                      "description")
-    fields = dict(zip(passport["name"], passport["value"])) if not passport.empty else {}
+    passport = _block(
+        _iss(f"securities/{info['SECID']}.json", **{"iss.only": "description"}),
+        "description",
+    )
+    fields = (
+        dict(zip(passport["name"], passport["value"])) if not passport.empty else {}
+    )
     bondtype = info.get("BONDTYPE") or fields.get("BOND_TYPE")
     subtype = info.get("BONDSUBTYPE") or fields.get("BOND_SUBTYPE")
     shortname = info.get("SHORTNAME") or fields.get("SHORTNAME") or ""
@@ -1029,14 +1317,21 @@ def bond_kind(ref: str) -> dict:
     perpetual = subtype == PERPETUAL or not _date(fields.get("MATDATE"))
     # бессрочным выпуск бывает только субординированным (Т1) или гибридным, маска
     # тикера — то, чем банки помечают суборды сами; больше у ISS ничего нет
-    subord = ("бессрочный выпуск" if perpetual else
-              "маска тикера" if SUBORD_MASK.search(shortname) else None)
+    subord = (
+        "бессрочный выпуск"
+        if perpetual
+        else "маска тикера" if SUBORD_MASK.search(shortname) else None
+    )
     unit = fields.get("FACEUNIT") or info.get("FACEUNIT")
 
     return {
-        "ISIN": isin, "SECID": info["SECID"], "SHORTNAME": shortname,
-        "kind": kind, "kind_moex": moex,
-        "BONDTYPE": bondtype, "BONDSUBTYPE": subtype,
+        "ISIN": isin,
+        "SECID": info["SECID"],
+        "SHORTNAME": shortname,
+        "kind": kind,
+        "kind_moex": moex,
+        "BONDTYPE": bondtype,
+        "BONDSUBTYPE": subtype,
         "amort": features["tranches"] >= 2 or kind == RMBS or moex == AMORT,
         # вид купона у амортизируемых и валютных бумаг BONDTYPE не показывает, зато
         # необъявленные купоны в расписании видны всегда
@@ -1052,6 +1347,7 @@ def bond_kind(ref: str) -> dict:
 
 
 # ------------------------------------------------------------ карточка бумаги
+
 
 def iss_columns(engine: str = "stock", market: str = "bonds") -> dict:
     """Метаданные колонок рынка -> {блок: {поле: {short_title, title, type, ...}}} (кеш).
@@ -1092,9 +1388,14 @@ def _as_rows(frame: pd.DataFrame, titles: dict, block: str) -> list:
     rows = []
     for name, value in frame.iloc[0].to_dict().items():
         meta = titles.get(name, {})
-        rows.append({"Показатель": meta.get("short_title") or meta.get("title") or name,
-                     "Значение": value if not pd.isna(value) else None,
-                     "Поле": name, "Блок": block})
+        rows.append(
+            {
+                "Показатель": meta.get("short_title") or meta.get("title") or name,
+                "Значение": value if not pd.isna(value) else None,
+                "Поле": name,
+                "Блок": block,
+            }
+        )
     return rows
 
 
@@ -1103,22 +1404,44 @@ def _rename(frame: pd.DataFrame, mapping: dict) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame(columns=list(mapping.values()))
     known = [c for c in mapping if c in frame.columns]
-    return frame[known + [c for c in frame.columns if c not in mapping]].rename(columns=mapping)
+    return frame[known + [c for c in frame.columns if c not in mapping]].rename(
+        columns=mapping
+    )
 
 
-BOARD_TITLES = {"boardid": "Режим", "title": "Название режима", "market": "Рынок",
-                "engine": "Движок", "is_traded": "Торгуется", "is_primary": "Основной",
-                "currencyid": "Валюта", "history_from": "История с",
-                "history_till": "История по", "listed_from": "В листинге с",
-                "listed_till": "В листинге по"}
+BOARD_TITLES = {
+    "boardid": "Режим",
+    "title": "Название режима",
+    "market": "Рынок",
+    "engine": "Движок",
+    "is_traded": "Торгуется",
+    "is_primary": "Основной",
+    "currencyid": "Валюта",
+    "history_from": "История с",
+    "history_till": "История по",
+    "listed_from": "В листинге с",
+    "listed_till": "В листинге по",
+}
 
-INDEX_TITLES = {"SECID": "Индекс", "SHORTNAME": "Название", "FROM": "Включена",
-                "TILL": "Исключена", "CURRENTVALUE": "Значение индекса",
-                "LASTCHANGE": "Изменение", "LASTCHANGEPRC": "Изменение, %"}
+INDEX_TITLES = {
+    "SECID": "Индекс",
+    "SHORTNAME": "Название",
+    "FROM": "Включена",
+    "TILL": "Исключена",
+    "CURRENTVALUE": "Значение индекса",
+    "LASTCHANGE": "Изменение",
+    "LASTCHANGEPRC": "Изменение, %",
+}
 
-AGGREGATE_TITLES = {"market_title": "Рынок", "tradedate": "Дата", "value": "Оборот",
-                    "volume": "Объем, штук", "numtrades": "Сделок",
-                    "updated_at": "Обновлено", "market_name": "Код рынка"}
+AGGREGATE_TITLES = {
+    "market_title": "Рынок",
+    "tradedate": "Дата",
+    "value": "Оборот",
+    "volume": "Объем, штук",
+    "numtrades": "Сделок",
+    "updated_at": "Обновлено",
+    "market_name": "Код рынка",
+}
 
 
 def get_bond_card(isin: str) -> dict:
@@ -1148,7 +1471,9 @@ def get_bond_card(isin: str) -> dict:
     к выпуску. Отфильтровать: card['quotes'].dropna(subset=['Значение']).
     """
     if not isinstance(isin, str):
-        raise TypeError("get_bond_card принимает один ISIN строкой; для пачки — в цикле")
+        raise TypeError(
+            "get_bond_card принимает один ISIN строкой; для пачки — в цикле"
+        )
     isin = isin.strip().upper()
 
     info = find_bond(isin)
@@ -1159,17 +1484,27 @@ def get_bond_card(isin: str) -> dict:
     security = _iss(f"securities/{secid}.json", **{"iss.only": "description,boards"})
     description, boards = _block(security, "description"), _block(security, "boards")
 
-    market = _iss(f"engines/stock/markets/bonds/securities/{secid}.json",
-                  **{"iss.only": "securities,marketdata,marketdata_yields"})
+    market = _iss(
+        f"engines/stock/markets/bonds/securities/{secid}.json",
+        **{"iss.only": "securities,marketdata,marketdata_yields"},
+    )
     titles = iss_columns()
 
-    passport = pd.DataFrame(
-        [{"Показатель": r.get("title") or r["name"],
-          "Значение": _typed(r.get("value"), r.get("type")),
-          "Поле": r["name"]}
-         for r in description.sort_values("sort_order").to_dict("records")],
-        columns=["Показатель", "Значение", "Поле"]) if not description.empty else \
-        pd.DataFrame(columns=["Показатель", "Значение", "Поле"])
+    passport = (
+        pd.DataFrame(
+            [
+                {
+                    "Показатель": r.get("title") or r["name"],
+                    "Значение": _typed(r.get("value"), r.get("type")),
+                    "Поле": r["name"],
+                }
+                for r in description.sort_values("sort_order").to_dict("records")
+            ],
+            columns=["Показатель", "Значение", "Поле"],
+        )
+        if not description.empty
+        else pd.DataFrame(columns=["Показатель", "Значение", "Поле"])
+    )
 
     board = info.get("BOARDID")
     quotes = []
@@ -1182,14 +1517,25 @@ def get_bond_card(isin: str) -> dict:
 
     return {
         "passport": passport,
-        "quotes": pd.DataFrame(quotes, columns=["Показатель", "Значение", "Поле", "Блок"]),
+        "quotes": pd.DataFrame(
+            quotes, columns=["Показатель", "Значение", "Поле", "Блок"]
+        ),
         "schedule": get_coupon_schedule(isin),
-        "boards": _rename(boards.sort_values(["is_traded", "is_primary"], ascending=False)
-                          if not boards.empty else boards, BOARD_TITLES),
-        "indices": _rename(_block(_iss(f"securities/{secid}/indices.json"), "indices"),
-                           INDEX_TITLES),
-        "aggregates": _rename(_block(_iss(f"securities/{secid}/aggregates.json"),
-                                     "aggregates"), AGGREGATE_TITLES),
+        "boards": _rename(
+            (
+                boards.sort_values(["is_traded", "is_primary"], ascending=False)
+                if not boards.empty
+                else boards
+            ),
+            BOARD_TITLES,
+        ),
+        "indices": _rename(
+            _block(_iss(f"securities/{secid}/indices.json"), "indices"), INDEX_TITLES
+        ),
+        "aggregates": _rename(
+            _block(_iss(f"securities/{secid}/aggregates.json"), "aggregates"),
+            AGGREGATE_TITLES,
+        ),
     }
 
 
@@ -1222,8 +1568,17 @@ TYPE_SECTORS = {
 
 BY_INDEX, BY_TYPE = "отраслевой индекс MOEX", "тип выпуска"
 
-SECTOR_COLUMNS = ["ISIN", "SECTOR", "SOURCE", "EMITENT", "INN", "SECID", "TICKER",
-                  "BONDTYPE", "STATUS"]
+SECTOR_COLUMNS = [
+    "ISIN",
+    "SECTOR",
+    "SOURCE",
+    "EMITENT",
+    "INN",
+    "SECID",
+    "TICKER",
+    "BONDTYPE",
+    "STATUS",
+]
 
 
 def sector_map() -> dict:
@@ -1237,19 +1592,31 @@ def sector_map() -> dict:
 
     shares = {}
     for index, sector in SECTOR_INDICES.items():
-        payload = _iss(f"statistics/engines/stock/markets/index/analytics/{index}.json",
-                       **{"iss.only": "analytics"})
+        payload = _iss(
+            f"statistics/engines/stock/markets/index/analytics/{index}.json",
+            **{"iss.only": "analytics"},
+        )
         frame = _block(payload, "analytics")
         for secid in frame.get("secids", []):
             if secid:
                 shares[secid] = sector
 
     mapping, start = {}, 0
-    while True:                       # справочник акций отдается страницами по 100
-        frame = _block(_iss("securities.json", **{
-            "iss.only": "securities", "group_by": "group",
-            "group_by_filter": "stock_shares", "is_trading": 1,
-            "limit": 100, "start": start}), "securities")
+    while True:  # справочник акций отдается страницами по 100
+        frame = _block(
+            _iss(
+                "securities.json",
+                **{
+                    "iss.only": "securities",
+                    "group_by": "group",
+                    "group_by_filter": "stock_shares",
+                    "is_trading": 1,
+                    "limit": 100,
+                    "start": start,
+                },
+            ),
+            "securities",
+        )
         if frame.empty:
             break
         for row in frame.to_dict("records"):
@@ -1268,8 +1635,9 @@ def find_emitter(isin: str) -> Optional[dict]:
     """ISIN -> строка справочника с эмитентом: emitent_id, название, ИНН, тип бумаги."""
     isin = isin.strip().upper()
     if isin not in _CACHE["emitters"]:
-        frame = _block(_iss("securities.json", q=isin, **{"iss.only": "securities"}),
-                       "securities")
+        frame = _block(
+            _iss("securities.json", q=isin, **{"iss.only": "securities"}), "securities"
+        )
         if not frame.empty and "isin" in frame.columns:
             frame = frame[frame["isin"].fillna("").str.upper() == isin]
         _CACHE["emitters"][isin] = None if frame.empty else frame.iloc[0].to_dict()
@@ -1312,9 +1680,15 @@ def get_issuer_sector(isins: Iterable[str]) -> pd.DataFrame:
                 rec["STATUS"] = "не найден на MOEX"
                 rows.append(rec)
                 continue
-            rec.update({"SECID": emitter.get("secid"), "EMITENT": emitter.get("emitent_title"),
-                        "INN": emitter.get("emitent_inn"), "BONDTYPE": emitter.get("type"),
-                        "STATUS": "ok"})
+            rec.update(
+                {
+                    "SECID": emitter.get("secid"),
+                    "EMITENT": emitter.get("emitent_title"),
+                    "INN": emitter.get("emitent_inn"),
+                    "BONDTYPE": emitter.get("type"),
+                    "STATUS": "ok",
+                }
+            )
 
             found = mapping.get(emitter.get("emitent_id"))
             if found:
@@ -1325,7 +1699,7 @@ def get_issuer_sector(isins: Iterable[str]) -> pd.DataFrame:
                 rec["STATUS"] = "эмитент не представлен в отраслевых индексах MOEX"
         except requests.RequestException as e:
             rec["STATUS"] = f"ошибка запроса: {e}"
-        except Exception as e:              # noqa: BLE001 — одна битая бумага не роняет пачку
+        except Exception as e:  # noqa: BLE001 — одна битая бумага не роняет пачку
             rec["STATUS"] = f"ошибка разбора: {e}"
         rows.append(rec)
 
@@ -1335,16 +1709,46 @@ def get_issuer_sector(isins: Iterable[str]) -> pd.DataFrame:
 if __name__ == "__main__":
     ISINS = ["RU000A0ZZ5H3", "RU000A1032P1", "RU000A1038V6"]
     print(get_bond_yields(ISINS, date="2026-09-04"), "\n")
-    print(get_bond_yields(ISINS, date="2026-09-04", details=True)[
-        ["ISIN", "SHORTNAME", "SETTLE", "PRICE", "PRICE_DATE", "ACCRUED",
-         "FACEVALUE", "MATDATE", "PUTDATE", "STATUS"]], "\n")
-    print(get_coupon_schedule("RU000A0ZZ5H3")[
-        ["date", "coupon_amount", "rate", "amort_amount", "total_amount", "FACEVALUE",
-         "OFFERPRICE", "offer_amount", "PUTOPTIONDATE"]].tail(8), "\n")
+    print(
+        get_bond_yields(ISINS, date="2026-09-04", details=True)[
+            [
+                "ISIN",
+                "SHORTNAME",
+                "SETTLE",
+                "PRICE",
+                "PRICE_DATE",
+                "ACCRUED",
+                "FACEVALUE",
+                "MATDATE",
+                "PUTDATE",
+                "STATUS",
+            ]
+        ],
+        "\n",
+    )
+    print(
+        get_coupon_schedule("RU000A0ZZ5H3")[
+            [
+                "date",
+                "coupon_amount",
+                "rate",
+                "amort_amount",
+                "total_amount",
+                "FACEVALUE",
+                "OFFERPRICE",
+                "offer_amount",
+                "PUTOPTIONDATE",
+            ]
+        ].tail(8),
+        "\n",
+    )
 
     card = get_bond_card("RU000A0ZZ5H3")
     print("карточка:", {name: len(frame) for name, frame in card.items()}, "\n")
     print(card["passport"].head(8).to_string(index=False), "\n")
 
-    print(get_issuer_sector(["RU000A1043H5", "RU000A1038V6", "RU000A0ZZ5H3"])[
-        ["ISIN", "SECTOR", "SOURCE", "EMITENT", "TICKER"]].to_string(index=False))
+    print(
+        get_issuer_sector(["RU000A1043H5", "RU000A1038V6", "RU000A0ZZ5H3"])[
+            ["ISIN", "SECTOR", "SOURCE", "EMITENT", "TICKER"]
+        ].to_string(index=False)
+    )

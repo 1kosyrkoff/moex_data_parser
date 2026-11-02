@@ -11,7 +11,7 @@ import sys
 
 def compose_otchet(inp_period):
     user = "tmp_skosyrkov"
-
+    password = "A65h9bmstu12sg9!"
     start_date = datetime.today() - timedelta(days=365 * 2 - 3)
     finish_date = datetime.today() - timedelta(days=inp_period)
     con = pyodbc.connect(
